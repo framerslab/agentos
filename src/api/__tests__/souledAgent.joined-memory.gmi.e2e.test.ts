@@ -21,7 +21,7 @@
  *
  * The PostgreSQL case runs where AGENTOS_TEST_POSTGRES_URL is set, in a schema of its own.
  */
-import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 vi.mock('../../core/llm/providers/implementations/OpenAIProvider', async () => ({ OpenAIProvider: (await import('./helpers/stubProviders')).stubProviderClass('openai') }));
 import * as fs from 'node:fs';
 import * as os from 'node:os';
@@ -44,8 +44,16 @@ import { resetLoggerFactory, setLogger } from '../../core/logging/loggerFactory'
 import { globalLLMProviderHealth } from '../../core/safety/LLMProviderHealthRegistry';
 import type { MemoryWriteRecord } from '../runtime/memoryWriteRecord';
 
-/** The runtime every case runs on. */
-const RUNTIME = 'gmi' as const;
+/**
+ * The runtimes every case runs on, each as the options that select it: `runtime: 'gmi'`, and no `runtime` at all,
+ * which is souledAgent()'s default.
+ */
+const RUNTIMES = [
+  ["runtime: 'gmi'", { runtime: 'gmi' }],
+  ['no runtime set', {}],
+] as const;
+/** The runtime options of the suite that is running: each suite of the runtimes sets them before its cases. */
+let RUNTIME: (typeof RUNTIMES)[number][1] = RUNTIMES[0][1];
 /** Cognitive memory on, embedding through OpenAI, with no mechanism that rewrites a stored row. */
 const COGNITIVE = { cognition: { memory: { embedding: { provider: 'openai' } }, mechanisms: false } };
 
@@ -127,7 +135,7 @@ async function open(extra: Record<string, unknown> = {}, replies: ProviderScript
   const apiKey = `k-souled-joined-${++n}`;
   served = script('openai', apiKey, { whole: true, replies });
   const a = await souledAgent({
-    runtime: RUNTIME,
+    ...RUNTIME,
     provider: 'openai',
     model: 'stub-model',
     apiKey,
@@ -326,446 +334,452 @@ const STORES: Array<[string, () => Promise<Record<string, unknown>>, boolean]> =
   ['a PostgreSQL adapter of the host', async () => ({ soulStore: { adapter: await postgresAdapter() }, tombstoneCopy: { path: path.join(dir, 'forgotten.sqlite') } }), Boolean(POSTGRES_URL)],
 ];
 
-describe.each(STORES)("one memory for a souled agent on the GMI runtime, its store on %s", (_store, storeOptions, runs) => {
-  it.runIf(runs)('memory survives a restart in the soul\'s store', async () => {
-    const options = await storeOptions();
-    const first = await open(options, [reply.text('A canary, lovely.'), reply.text('Dawn songs, noted.'), ...spare()]);
-    const session = first.session('s1', { userId: 'alice' });
-    await writeOf(await session.send('My canary is named LARK-7.'));
-    await writeOf(await session.send('My canary sings at dawn.'));
-    const filed = await rowsUnder(storeBrain(first), keyOf('alice'));
-    await closed(first);
-
-    const again = await open(options, [reply.text('It is LARK-7.'), ...spare()]);
-    await again.session('s2', { userId: 'alice' }).send('What is my canary named?');
-    // A new session of a new agent: the turns reach the prompt through the mind's recall, not through history.
-    expect(mindBlockOf(lastCall())).toContain('LARK-7');
-    // The four rows of the two turns, under her key, each the mind's, with who spoke.
-    expect(filed).toHaveLength(4);
-    expect(filed.map(metaOf)).toEqual([
-      expect.objectContaining({ filedBy: 'mind', speaker: 'user', subject: { kind: 'user', id: 'alice' } }),
-      expect.objectContaining({ filedBy: 'mind', speaker: 'assistant', subject: { kind: 'user', id: 'alice' } }),
-      expect.objectContaining({ filedBy: 'mind', speaker: 'user', subject: { kind: 'user', id: 'alice' } }),
-      expect.objectContaining({ filedBy: 'mind', speaker: 'assistant', subject: { kind: 'user', id: 'alice' } }),
-    ]);
+describe.each(RUNTIMES)('with %s', (_name, runtime) => {
+  beforeAll(() => {
+    RUNTIME = runtime;
   });
 
-  it.runIf(runs)('two people never meet', async () => {
-    const a = await open(await storeOptions(), [reply.text('Corn, noted.'), reply.text('Kale, noted.'), reply.text('It eats kale.'), ...spare()]);
-    // What each person told the soul's provider before the join: rows of their key with no mark of the mind.
-    await a.memory!.remember('Alice keeps a ferret named Quill.', { type: 'episodic', scope: 'conversation', scopeId: keyOf('alice') });
-    await a.memory!.remember('Bob keeps a ferret named Pike.', { type: 'episodic', scope: 'conversation', scopeId: keyOf('bob') });
+  describe.each(STORES)("one memory for a souled agent on the GMI runtime, its store on %s", (_store, storeOptions, runs) => {
+    it.runIf(runs)('memory survives a restart in the soul\'s store', async () => {
+      const options = await storeOptions();
+      const first = await open(options, [reply.text('A canary, lovely.'), reply.text('Dawn songs, noted.'), ...spare()]);
+      const session = first.session('s1', { userId: 'alice' });
+      await writeOf(await session.send('My canary is named LARK-7.'));
+      await writeOf(await session.send('My canary sings at dawn.'));
+      const filed = await rowsUnder(storeBrain(first), keyOf('alice'));
+      await closed(first);
 
-    const bobs = writtenIds(await writeOf(await a.session('b1', { userId: 'bob' }).send('My ferret eats corn.')));
-    await writeOf(await a.session('a1', { userId: 'alice' }).send('My ferret eats kale.'));
-    const result = await a.session('a2', { userId: 'alice' }).send('What does my ferret eat?');
-    const call = lastCall();
+      const again = await open(options, [reply.text('It is LARK-7.'), ...spare()]);
+      await again.session('s2', { userId: 'alice' }).send('What is my canary named?');
+      // A new session of a new agent: the turns reach the prompt through the mind's recall, not through history.
+      expect(mindBlockOf(lastCall())).toContain('LARK-7');
+      // The four rows of the two turns, under her key, each the mind's, with who spoke.
+      expect(filed).toHaveLength(4);
+      expect(filed.map(metaOf)).toEqual([
+        expect.objectContaining({ filedBy: 'mind', speaker: 'user', subject: { kind: 'user', id: 'alice' } }),
+        expect.objectContaining({ filedBy: 'mind', speaker: 'assistant', subject: { kind: 'user', id: 'alice' } }),
+        expect.objectContaining({ filedBy: 'mind', speaker: 'user', subject: { kind: 'user', id: 'alice' } }),
+        expect.objectContaining({ filedBy: 'mind', speaker: 'assistant', subject: { kind: 'user', id: 'alice' } }),
+      ]);
+    });
 
-    // The soul's provider reads her row it filed, and none the mind filed.
-    expect(providerBlockOf(call)).toContain('Quill');
-    expect(providerBlockOf(call)).not.toContain('kale');
-    // The mind reads her row it filed, and none the soul's provider filed.
-    expect(mindBlockOf(call)).toContain('kale');
-    expect(mindBlockOf(call)).not.toContain('Quill');
-    // Nothing of Bob reaches her turn, by either path or in what the turn's recall reports.
-    const request = JSON.stringify(call.messages);
-    for (const his of ['Pike', 'corn']) expect(request).not.toContain(his);
-    expect(bobs).toHaveLength(2);
-    for (const id of bobs) expect(JSON.stringify(result.memoryRecall ?? {})).not.toContain(id);
-  });
-});
+    it.runIf(runs)('two people never meet', async () => {
+      const a = await open(await storeOptions(), [reply.text('Corn, noted.'), reply.text('Kale, noted.'), reply.text('It eats kale.'), ...spare()]);
+      // What each person told the soul's provider before the join: rows of their key with no mark of the mind.
+      await a.memory!.remember('Alice keeps a ferret named Quill.', { type: 'episodic', scope: 'conversation', scopeId: keyOf('alice') });
+      await a.memory!.remember('Bob keeps a ferret named Pike.', { type: 'episodic', scope: 'conversation', scopeId: keyOf('bob') });
 
-describe('one memory for a souled agent on the GMI runtime', () => {
-  it('one turn writes two rows', async () => {
-    const a = await open({}, [reply.text('A canary, lovely.'), ...spare()]);
-    const brain = storeBrain(a);
-    const before = (await rowsOf(brain)).length;
+      const bobs = writtenIds(await writeOf(await a.session('b1', { userId: 'bob' }).send('My ferret eats corn.')));
+      await writeOf(await a.session('a1', { userId: 'alice' }).send('My ferret eats kale.'));
+      const result = await a.session('a2', { userId: 'alice' }).send('What does my ferret eat?');
+      const call = lastCall();
 
-    const record = await writeOf(await a.session('s1', { userId: 'alice' }).send('My canary is named LARK-7.'));
-
-    const after = await rowsOf(brain);
-    expect(after).toHaveLength(before + 2);
-    const hers = await rowsUnder(brain, keyOf('alice'));
-    expect(hers.map((row) => row.content)).toEqual(['My canary is named LARK-7.', 'A canary, lovely.']);
-    expect(hers.map((row) => metaOf(row).filedBy)).toEqual(['mind', 'mind']);
-    // The record names the two rows, the user's first.
-    expect(record).toEqual({
-      entries: [
-        { role: 'user', outcome: 'written', traceId: hers[0].id },
-        { role: 'assistant', outcome: 'written', traceId: hers[1].id },
-      ],
+      // The soul's provider reads her row it filed, and none the mind filed.
+      expect(providerBlockOf(call)).toContain('Quill');
+      expect(providerBlockOf(call)).not.toContain('kale');
+      // The mind reads her row it filed, and none the soul's provider filed.
+      expect(mindBlockOf(call)).toContain('kale');
+      expect(mindBlockOf(call)).not.toContain('Quill');
+      // Nothing of Bob reaches her turn, by either path or in what the turn's recall reports.
+      const request = JSON.stringify(call.messages);
+      for (const his of ['Pike', 'corn']) expect(request).not.toContain(his);
+      expect(bobs).toHaveLength(2);
+      for (const id of bobs) expect(JSON.stringify(result.memoryRecall ?? {})).not.toContain(id);
     });
   });
 
-  it('memory filed before the join keeps its recall', async () => {
-    const managers = managersBuilt();
-    const a = await open({}, [reply.text('Quill, noted.'), ...spare()]);
-    const brain = storeBrain(a);
-    const planted = await a.memory!.remember('Alice keeps a ferret named Quill.', { type: 'episodic', scope: 'conversation', scopeId: keyOf('alice') });
-    const rowBefore = (await rowsOf(brain)).find((row) => row.id === planted.id)!;
+  describe('one memory for a souled agent on the GMI runtime', () => {
+    it('one turn writes two rows', async () => {
+      const a = await open({}, [reply.text('A canary, lovely.'), ...spare()]);
+      const brain = storeBrain(a);
+      const before = (await rowsOf(brain)).length;
 
-    await writeOf(await a.session('s1', { userId: 'alice' }).send('Tell me about my ferret Quill.'));
+      const record = await writeOf(await a.session('s1', { userId: 'alice' }).send('My canary is named LARK-7.'));
 
-    expect(providerBlockOf(lastCall())).toContain('Alice keeps a ferret named Quill.');
-    expect(mindBlockOf(lastCall())).not.toContain('Alice keeps a ferret named Quill.');
-    expect(managers().at(-1)!.getStore().listTraces().map((trace) => trace.id)).not.toContain(planted.id);
-    const rowAfter = (await rowsOf(brain)).find((row) => row.id === planted.id)!;
-    // The row is as it was planted, with no mark of the mind: all the turn wrote on it is the provider's one read.
-    expect(apartFromReads(rowAfter)).toEqual(apartFromReads(rowBefore));
-    expect(metaOf(rowAfter)).not.toHaveProperty('filedBy');
-    expect(readsOf(rowBefore)).toBe(0);
-    expect(readsOf(rowAfter)).toBe(1);
-  });
+      const after = await rowsOf(brain);
+      expect(after).toHaveLength(before + 2);
+      const hers = await rowsUnder(brain, keyOf('alice'));
+      expect(hers.map((row) => row.content)).toEqual(['My canary is named LARK-7.', 'A canary, lovely.']);
+      expect(hers.map((row) => metaOf(row).filedBy)).toEqual(['mind', 'mind']);
+      // The record names the two rows, the user's first.
+      expect(record).toEqual({
+        entries: [
+          { role: 'user', outcome: 'written', traceId: hers[0].id },
+          { role: 'assistant', outcome: 'written', traceId: hers[1].id },
+        ],
+      });
+    });
 
-  it("a person's first turn loads their rows alone", async () => {
-    const managers = managersBuilt();
-    const a = await open({}, [reply.text('The ferry, noted.'), ...spare()]);
-    const brain = storeBrain(a);
-    const plant = await planter(brain);
-    const t0 = Date.now() - 600_000;
-    const hers: string[] = [];
-    for (let i = 0; i < 10; i += 1) {
-      hers.push(`alice-${i}`);
-      await plant.store(mindTrace(`alice-${i}`, `Alice note ${i} about the ferry.`, 'alice', t0 + i));
-    }
-    // Bob's rows are the newest in the store: a load of the brain's newest rows would be his alone.
-    for (let i = 0; i < 1200; i += 1) await plant.store(mindTrace(`bob-${i}`, `Bob note ${i} about the ferry.`, 'bob', t0 + 100 + i));
+    it('memory filed before the join keeps its recall', async () => {
+      const managers = managersBuilt();
+      const a = await open({}, [reply.text('Quill, noted.'), ...spare()]);
+      const brain = storeBrain(a);
+      const planted = await a.memory!.remember('Alice keeps a ferret named Quill.', { type: 'episodic', scope: 'conversation', scopeId: keyOf('alice') });
+      const rowBefore = (await rowsOf(brain)).find((row) => row.id === planted.id)!;
 
-    await writeOf(await a.session('s1', { userId: 'alice' }).send('When does the ferry leave?'));
+      await writeOf(await a.session('s1', { userId: 'alice' }).send('Tell me about my ferret Quill.'));
 
-    const store = managers().at(-1)!.getStore();
-    const cached = store.listTraces();
-    for (const id of hers) expect(cached.map((trace) => trace.id)).toContain(id);
-    expect(cached.filter((trace) => trace.scopeId === keyOf('bob'))).toEqual([]);
-    // Nor does the mind's vector collection: a listing of his key, which the cache holds nothing of, reads it.
-    expect(await store.getByScope('conversation', keyOf('bob'))).toEqual([]);
-    expect(mindBlockOf(lastCall())).toContain('Alice note');
-    expect(mindBlockOf(lastCall())).not.toContain('Bob note');
-  });
+      expect(providerBlockOf(lastCall())).toContain('Alice keeps a ferret named Quill.');
+      expect(mindBlockOf(lastCall())).not.toContain('Alice keeps a ferret named Quill.');
+      expect(managers().at(-1)!.getStore().listTraces().map((trace) => trace.id)).not.toContain(planted.id);
+      const rowAfter = (await rowsOf(brain)).find((row) => row.id === planted.id)!;
+      // The row is as it was planted, with no mark of the mind: all the turn wrote on it is the provider's one read.
+      expect(apartFromReads(rowAfter)).toEqual(apartFromReads(rowBefore));
+      expect(metaOf(rowAfter)).not.toHaveProperty('filedBy');
+      expect(readsOf(rowBefore)).toBe(0);
+      expect(readsOf(rowAfter)).toBe(1);
+    });
 
-  it("a one-shot call files nothing and recalls the operator's pages", async () => {
-    fs.mkdirSync(path.join(dir, 'memory', 'concepts'), { recursive: true });
-    fs.writeFileSync(path.join(dir, 'memory', 'concepts', 'ops.md'), '---\nid: concepts/ops\ntype: concept\nsummary: Opening hours\n---\nZorblat opens at nine.\n');
-    const a = await open({}, [reply.text('At nine.'), ...spare()]);
-    const brain = storeBrain(a);
-    const before = await rowsOf(brain);
+    it("a person's first turn loads their rows alone", async () => {
+      const managers = managersBuilt();
+      const a = await open({}, [reply.text('The ferry, noted.'), ...spare()]);
+      const brain = storeBrain(a);
+      const plant = await planter(brain);
+      const t0 = Date.now() - 600_000;
+      const hers: string[] = [];
+      for (let i = 0; i < 10; i += 1) {
+        hers.push(`alice-${i}`);
+        await plant.store(mindTrace(`alice-${i}`, `Alice note ${i} about the ferry.`, 'alice', t0 + i));
+      }
+      // Bob's rows are the newest in the store: a load of the brain's newest rows would be his alone.
+      for (let i = 0; i < 1200; i += 1) await plant.store(mindTrace(`bob-${i}`, `Bob note ${i} about the ferry.`, 'bob', t0 + 100 + i));
 
-    const result = await a.generate('When does Zorblat open?');
+      await writeOf(await a.session('s1', { userId: 'alice' }).send('When does the ferry leave?'));
 
-    expect(providerBlockOf(lastCall())).toContain('Zorblat opens at nine.');
-    expect(result.memoryWrite).toBeUndefined();
-    // No row is added, and none is rewritten: the call leaves its read of the page on the page's row, and no more.
-    const after = await rowsOf(brain);
-    expect(after.map(apartFromReads)).toEqual(before.map(apartFromReads));
-    expect(after.map((row) => metaOf(row).filedBy)).toEqual(before.map(() => undefined));
-  });
+      const store = managers().at(-1)!.getStore();
+      const cached = store.listTraces();
+      for (const id of hers) expect(cached.map((trace) => trace.id)).toContain(id);
+      expect(cached.filter((trace) => trace.scopeId === keyOf('bob'))).toEqual([]);
+      // Nor does the mind's vector collection: a listing of his key, which the cache holds nothing of, reads it.
+      expect(await store.getByScope('conversation', keyOf('bob'))).toEqual([]);
+      expect(mindBlockOf(lastCall())).toContain('Alice note');
+      expect(mindBlockOf(lastCall())).not.toContain('Bob note');
+    });
 
-  it('an embedding model of another vector size serves the next agent, and the old rows stay out of its index', async () => {
-    const first = await open({}, [reply.text('A canary, lovely.'), ...spare()]);
-    await writeOf(await first.session('s1', { userId: 'alice' }).send('My canary is named LARK-7.'));
-    await closed(first);
+    it("a one-shot call files nothing and recalls the operator's pages", async () => {
+      fs.mkdirSync(path.join(dir, 'memory', 'concepts'), { recursive: true });
+      fs.writeFileSync(path.join(dir, 'memory', 'concepts', 'ops.md'), '---\nid: concepts/ops\ntype: concept\nsummary: Opening hours\n---\nZorblat opens at nine.\n');
+      const a = await open({}, [reply.text('At nine.'), ...spare()]);
+      const brain = storeBrain(a);
+      const before = await rowsOf(brain);
 
-    // The host moves to a model of eight values a vector.
-    const smallKey = `k-souled-joined-small-${++n}`;
-    const small = script('openai', smallKey, { replies: [], dimension: 8 });
-    vi.stubEnv('OPENAI_API_KEY', smallKey);
-    const again = await open(
-      { cognition: { memory: { embedding: { provider: 'openai', model: 'text-embedding-3-small', dimension: 8 } }, mechanisms: false } },
-      [reply.text('Hello again.'), reply.text('Tea, noted.'), ...spare()],
-    );
-    const session = again.session('s2', { userId: 'alice' });
-    const record = await writeOf(await session.send('My canary is named LARK-7, remember?'));
-    expect(record.entries.map((entry) => entry.outcome)).toEqual(['written', 'written']);
-    // One line a load, with the count of the rows of the old size; their text was never sent again.
-    expect(lines('memory.vectors_unfit')).toEqual([expect.objectContaining({ rows: 2 })]);
-    expect(small.embedded).not.toContain('A canary, lovely.');
-    await writeOf(await session.send('I drink tea.'));
-    expect(lines('memory.vectors_unfit')).toHaveLength(1);
-    // The rows the mind filed: two of the first agent, four of this one. Her key also holds the page the first agent's
-    // close compiled, which the mind did not file.
-    const rows = (await rowsUnder(storeBrain(again), keyOf('alice'))).filter((row) => metaOf(row).filedBy === 'mind');
-    expect(rows).toHaveLength(6);
-  });
+      const result = await a.generate('When does Zorblat open?');
 
-  it('two sessions of one person sending at once file four rows, each record naming its own two', async () => {
-    const { gate, release } = gated();
-    const a = await open({}, [
-      reply.hold([], gate, reply.text('First reply, noted.')),
-      reply.hold([], gate, reply.text('Second reply, noted.')),
-      ...spare(),
-    ]);
-    try {
-      const one = a.session('s1', { userId: 'alice' }).send('From the first session.');
-      const two = a.session('s2', { userId: 'alice' }).send('From the second session.');
-      await vi.waitFor(() => expect(served.seen).toHaveLength(2), { timeout: 4_000 });
-      release();
-      const records = await Promise.all([one, two].map(async (sent) => writeOf(await sent)));
+      expect(providerBlockOf(lastCall())).toContain('Zorblat opens at nine.');
+      expect(result.memoryWrite).toBeUndefined();
+      // No row is added, and none is rewritten: the call leaves its read of the page on the page's row, and no more.
+      const after = await rowsOf(brain);
+      expect(after.map(apartFromReads)).toEqual(before.map(apartFromReads));
+      expect(after.map((row) => metaOf(row).filedBy)).toEqual(before.map(() => undefined));
+    });
+
+    it('an embedding model of another vector size serves the next agent, and the old rows stay out of its index', async () => {
+      const first = await open({}, [reply.text('A canary, lovely.'), ...spare()]);
+      await writeOf(await first.session('s1', { userId: 'alice' }).send('My canary is named LARK-7.'));
+      await closed(first);
+
+      // The host moves to a model of eight values a vector.
+      const smallKey = `k-souled-joined-small-${++n}`;
+      const small = script('openai', smallKey, { replies: [], dimension: 8 });
+      vi.stubEnv('OPENAI_API_KEY', smallKey);
+      const again = await open(
+        { cognition: { memory: { embedding: { provider: 'openai', model: 'text-embedding-3-small', dimension: 8 } }, mechanisms: false } },
+        [reply.text('Hello again.'), reply.text('Tea, noted.'), ...spare()],
+      );
+      const session = again.session('s2', { userId: 'alice' });
+      const record = await writeOf(await session.send('My canary is named LARK-7, remember?'));
+      expect(record.entries.map((entry) => entry.outcome)).toEqual(['written', 'written']);
+      // One line a load, with the count of the rows of the old size; their text was never sent again.
+      expect(lines('memory.vectors_unfit')).toEqual([expect.objectContaining({ rows: 2 })]);
+      expect(small.embedded).not.toContain('A canary, lovely.');
+      await writeOf(await session.send('I drink tea.'));
+      expect(lines('memory.vectors_unfit')).toHaveLength(1);
+      // The rows the mind filed: two of the first agent, four of this one. Her key also holds the page the first agent's
+      // close compiled, which the mind did not file.
+      const rows = (await rowsUnder(storeBrain(again), keyOf('alice'))).filter((row) => metaOf(row).filedBy === 'mind');
+      expect(rows).toHaveLength(6);
+    });
+
+    it('two sessions of one person sending at once file four rows, each record naming its own two', async () => {
+      const { gate, release } = gated();
+      const a = await open({}, [
+        reply.hold([], gate, reply.text('First reply, noted.')),
+        reply.hold([], gate, reply.text('Second reply, noted.')),
+        ...spare(),
+      ]);
+      try {
+        const one = a.session('s1', { userId: 'alice' }).send('From the first session.');
+        const two = a.session('s2', { userId: 'alice' }).send('From the second session.');
+        await vi.waitFor(() => expect(served.seen).toHaveLength(2), { timeout: 4_000 });
+        release();
+        const records = await Promise.all([one, two].map(async (sent) => writeOf(await sent)));
+
+        const rows = await rowsUnder(storeBrain(a), keyOf('alice'));
+        expect(rows).toHaveLength(4);
+        expect(rows.every((row) => metaOf(row).filedBy === 'mind')).toBe(true);
+        const ids = records.map(writtenIds);
+        expect(ids.map((pair) => pair.length)).toEqual([2, 2]);
+        expect(new Set(ids.flat())).toEqual(new Set(rows.map((row) => row.id)));
+        const contentOf = (id: string) => rows.find((row) => row.id === id)?.content;
+        // Each record names its own message first, then a reply; the two replies are the two the model gave.
+        expect(contentOf(ids[0][0])).toBe('From the first session.');
+        expect(contentOf(ids[1][0])).toBe('From the second session.');
+        expect(new Set([contentOf(ids[0][1]), contentOf(ids[1][1])])).toEqual(new Set(['First reply, noted.', 'Second reply, noted.']));
+      } finally {
+        release();
+      }
+    });
+
+    it.each<[string, (session: ReturnType<SouledAgent['session']>, stop: AbortController) => Promise<unknown>]>([
+      ['whose model call fails', (session) => session.send('My canary is named LARK-7.')],
+      ['that session.close() stops', async (session) => {
+        const sent = session.send('My canary is named LARK-7.');
+        await vi.waitFor(() => expect(served.seen.length).toBeGreaterThan(0), { timeout: 4_000 });
+        await session.close();
+        return sent;
+      }],
+      ["that the caller's signal stops", async (session, stop) => {
+        const sent = session.send('My canary is named LARK-7.', { abortSignal: stop.signal });
+        await vi.waitFor(() => expect(served.seen.length).toBeGreaterThan(0), { timeout: 4_000 });
+        stop.abort();
+        return sent;
+      }],
+    ])('a turn %s files neither side, and the next turn files as usual', async (name, run) => {
+      const failing = name === 'whose model call fails';
+      const a = await open({}, [
+        failing ? Object.assign(new Error('bad request'), { httpStatus: 400 }) : reply.hold([], new Promise<void>(() => undefined), reply.text('Never sent.')),
+        reply.text('Tea, noted.'),
+        ...spare(),
+      ]);
+      const stop = new AbortController();
+      const session = a.session('s1', { userId: 'alice' });
+      await expect(run(session, stop)).rejects.toBeDefined();
+      expect(await rowsUnder(storeBrain(a), keyOf('alice'))).toEqual([]);
+
+      const next = await a.session('s1', { userId: 'alice' }).send('I drink tea.');
+      const record = await writeOf(next);
+      const rows = await rowsUnder(storeBrain(a), keyOf('alice'));
+      expect(rows.map((row) => row.content)).toEqual(['I drink tea.', 'Tea, noted.']);
+      expect(rows.map((row) => metaOf(row).filedBy)).toEqual(['mind', 'mind']);
+      expect(writtenIds(record)).toEqual(rows.map((row) => row.id));
+    });
+
+    it('a structured send whose answer does not parse files neither side, and the next turn files as usual', async () => {
+      const a = await open({}, [reply.text('Lyon'), reply.text('Tea, noted.'), ...spare()]);
+      const session = a.session('s1', { userId: 'alice' });
+      // Not JSON: the session refuses the reply after its GMI has ended the turn, and keeps nothing of the exchange.
+      await expect(session.send('Where does my canary LARK-7 live?', { responseSchema: z.object({ city: z.string() }) })).rejects.toBeInstanceOf(ObjectGenerationError);
+      expect(session.messages()).toEqual([]);
+
+      const record = await writeOf(await session.send('I drink tea.'));
+      // Her writes run one after another: once this turn's two have landed, a filing of the refused turn would have.
+      const rows = await rowsUnder(storeBrain(a), keyOf('alice'));
+      expect(rows.map((row) => row.content)).toEqual(['I drink tea.', 'Tea, noted.']);
+      expect(rows.map((row) => metaOf(row).filedBy)).toEqual(['mind', 'mind']);
+      expect(writtenIds(record)).toEqual(rows.map((row) => row.id));
+      // The refused reply was never sent to the embedding provider for a filing.
+      expect(embeddings.embedded).not.toContain('Lyon');
+    });
+
+    it('a turn with an empty reply files the user\'s message alone', async () => {
+      const a = await open({}, [reply.text(''), ...spare()]);
+      const record = await writeOf(await a.session('s1', { userId: 'alice' }).send('My canary is named LARK-7.'));
+      const rows = await rowsUnder(storeBrain(a), keyOf('alice'));
+      expect(rows.map((row) => row.content)).toEqual(['My canary is named LARK-7.']);
+      expect(metaOf(rows[0]).filedBy).toBe('mind');
+      expect(record).toEqual({ entries: [{ role: 'user', outcome: 'written', traceId: rows[0].id }] });
+    });
+
+    it('a reply an onAfterGeneration hook rewrites is filed as the session keeps it', async () => {
+      const a = await open(
+        { onAfterGeneration: async (step: { text: string }) => ({ ...step, text: step.text.replace('LARK-7', 'your bird') }) },
+        [reply.text('Your canary LARK-7, lovely.'), ...spare()],
+      );
+
+      const result = await a.session('s1', { userId: 'alice' }).send('My canary is named LARK-7.');
+
+      expect(result.text).toBe('Your canary your bird, lovely.');
+      const record = await writeOf(result);
+      const rows = await rowsUnder(storeBrain(a), keyOf('alice'));
+      expect(rows.map((row) => row.content)).toEqual(['My canary is named LARK-7.', 'Your canary your bird, lovely.']);
+      expect(writtenIds(record)).toEqual(rows.map((row) => row.id));
+      // The model's own words, which the hook took out, were never sent to be embedded for a filing.
+      expect(embeddings.embedded).not.toContain('Your canary LARK-7, lovely.');
+    });
+
+    it("a reply an onAfterGeneration hook empties files the user's message alone", async () => {
+      const a = await open({ onAfterGeneration: async (step: { text: string }) => ({ ...step, text: '' }) }, [reply.text('A canary, lovely.'), ...spare()]);
+
+      const record = await writeOf(await a.session('s1', { userId: 'alice' }).send('My canary is named LARK-7.'));
 
       const rows = await rowsUnder(storeBrain(a), keyOf('alice'));
-      expect(rows).toHaveLength(4);
-      expect(rows.every((row) => metaOf(row).filedBy === 'mind')).toBe(true);
-      const ids = records.map(writtenIds);
-      expect(ids.map((pair) => pair.length)).toEqual([2, 2]);
-      expect(new Set(ids.flat())).toEqual(new Set(rows.map((row) => row.id)));
-      const contentOf = (id: string) => rows.find((row) => row.id === id)?.content;
-      // Each record names its own message first, then a reply; the two replies are the two the model gave.
-      expect(contentOf(ids[0][0])).toBe('From the first session.');
-      expect(contentOf(ids[1][0])).toBe('From the second session.');
-      expect(new Set([contentOf(ids[0][1]), contentOf(ids[1][1])])).toEqual(new Set(['First reply, noted.', 'Second reply, noted.']));
-    } finally {
-      release();
-    }
-  });
+      expect(rows.map((row) => row.content)).toEqual(['My canary is named LARK-7.']);
+      expect(record).toEqual({ entries: [{ role: 'user', outcome: 'written', traceId: rows[0].id }] });
+      expect(embeddings.embedded).not.toContain('A canary, lovely.');
+    });
 
-  it.each<[string, (session: ReturnType<SouledAgent['session']>, stop: AbortController) => Promise<unknown>]>([
-    ['whose model call fails', (session) => session.send('My canary is named LARK-7.')],
-    ['that session.close() stops', async (session) => {
-      const sent = session.send('My canary is named LARK-7.');
-      await vi.waitFor(() => expect(served.seen.length).toBeGreaterThan(0), { timeout: 4_000 });
-      await session.close();
-      return sent;
-    }],
-    ["that the caller's signal stops", async (session, stop) => {
-      const sent = session.send('My canary is named LARK-7.', { abortSignal: stop.signal });
-      await vi.waitFor(() => expect(served.seen.length).toBeGreaterThan(0), { timeout: 4_000 });
-      stop.abort();
-      return sent;
-    }],
-  ])('a turn %s files neither side, and the next turn files as usual', async (name, run) => {
-    const failing = name === 'whose model call fails';
-    const a = await open({}, [
-      failing ? Object.assign(new Error('bad request'), { httpStatus: 400 }) : reply.hold([], new Promise<void>(() => undefined), reply.text('Never sent.')),
-      reply.text('Tea, noted.'),
-      ...spare(),
-    ]);
-    const stop = new AbortController();
-    const session = a.session('s1', { userId: 'alice' });
-    await expect(run(session, stop)).rejects.toBeDefined();
-    expect(await rowsUnder(storeBrain(a), keyOf('alice'))).toEqual([]);
+    it('a reply an onAfterGeneration hook gives a turn whose model wrote nothing is filed as the session keeps it', async () => {
+      const a = await open(
+        { onAfterGeneration: async (step: { text: string }) => ({ ...step, text: step.text || 'Your canary is noted.' }) },
+        [reply.text(''), ...spare()],
+      );
 
-    const next = await a.session('s1', { userId: 'alice' }).send('I drink tea.');
-    const record = await writeOf(next);
-    const rows = await rowsUnder(storeBrain(a), keyOf('alice'));
-    expect(rows.map((row) => row.content)).toEqual(['I drink tea.', 'Tea, noted.']);
-    expect(rows.map((row) => metaOf(row).filedBy)).toEqual(['mind', 'mind']);
-    expect(writtenIds(record)).toEqual(rows.map((row) => row.id));
-  });
+      const result = await a.session('s1', { userId: 'alice' }).send('My canary is named LARK-7.');
 
-  it('a structured send whose answer does not parse files neither side, and the next turn files as usual', async () => {
-    const a = await open({}, [reply.text('Lyon'), reply.text('Tea, noted.'), ...spare()]);
-    const session = a.session('s1', { userId: 'alice' });
-    // Not JSON: the session refuses the reply after its GMI has ended the turn, and keeps nothing of the exchange.
-    await expect(session.send('Where does my canary LARK-7 live?', { responseSchema: z.object({ city: z.string() }) })).rejects.toBeInstanceOf(ObjectGenerationError);
-    expect(session.messages()).toEqual([]);
+      expect(result.text).toBe('Your canary is noted.');
+      const record = await writeOf(result);
+      const rows = await rowsUnder(storeBrain(a), keyOf('alice'));
+      expect(rows.map((row) => row.content)).toEqual(['My canary is named LARK-7.', 'Your canary is noted.']);
+      expect(record.entries.map((entry) => entry.role)).toEqual(['user', 'assistant']);
+      expect(writtenIds(record)).toEqual(rows.map((row) => row.id));
+    });
 
-    const record = await writeOf(await session.send('I drink tea.'));
-    // Her writes run one after another: once this turn's two have landed, a filing of the refused turn would have.
-    const rows = await rowsUnder(storeBrain(a), keyOf('alice'));
-    expect(rows.map((row) => row.content)).toEqual(['I drink tea.', 'Tea, noted.']);
-    expect(rows.map((row) => metaOf(row).filedBy)).toEqual(['mind', 'mind']);
-    expect(writtenIds(record)).toEqual(rows.map((row) => row.id));
-    // The refused reply was never sent to the embedding provider for a filing.
-    expect(embeddings.embedded).not.toContain('Lyon');
-  });
-
-  it('a turn with an empty reply files the user\'s message alone', async () => {
-    const a = await open({}, [reply.text(''), ...spare()]);
-    const record = await writeOf(await a.session('s1', { userId: 'alice' }).send('My canary is named LARK-7.'));
-    const rows = await rowsUnder(storeBrain(a), keyOf('alice'));
-    expect(rows.map((row) => row.content)).toEqual(['My canary is named LARK-7.']);
-    expect(metaOf(rows[0]).filedBy).toBe('mind');
-    expect(record).toEqual({ entries: [{ role: 'user', outcome: 'written', traceId: rows[0].id }] });
-  });
-
-  it('a reply an onAfterGeneration hook rewrites is filed as the session keeps it', async () => {
-    const a = await open(
-      { onAfterGeneration: async (step: { text: string }) => ({ ...step, text: step.text.replace('LARK-7', 'your bird') }) },
-      [reply.text('Your canary LARK-7, lovely.'), ...spare()],
-    );
-
-    const result = await a.session('s1', { userId: 'alice' }).send('My canary is named LARK-7.');
-
-    expect(result.text).toBe('Your canary your bird, lovely.');
-    const record = await writeOf(result);
-    const rows = await rowsUnder(storeBrain(a), keyOf('alice'));
-    expect(rows.map((row) => row.content)).toEqual(['My canary is named LARK-7.', 'Your canary your bird, lovely.']);
-    expect(writtenIds(record)).toEqual(rows.map((row) => row.id));
-    // The model's own words, which the hook took out, were never sent to be embedded for a filing.
-    expect(embeddings.embedded).not.toContain('Your canary LARK-7, lovely.');
-  });
-
-  it("a reply an onAfterGeneration hook empties files the user's message alone", async () => {
-    const a = await open({ onAfterGeneration: async (step: { text: string }) => ({ ...step, text: '' }) }, [reply.text('A canary, lovely.'), ...spare()]);
-
-    const record = await writeOf(await a.session('s1', { userId: 'alice' }).send('My canary is named LARK-7.'));
-
-    const rows = await rowsUnder(storeBrain(a), keyOf('alice'));
-    expect(rows.map((row) => row.content)).toEqual(['My canary is named LARK-7.']);
-    expect(record).toEqual({ entries: [{ role: 'user', outcome: 'written', traceId: rows[0].id }] });
-    expect(embeddings.embedded).not.toContain('A canary, lovely.');
-  });
-
-  it('a reply an onAfterGeneration hook gives a turn whose model wrote nothing is filed as the session keeps it', async () => {
-    const a = await open(
-      { onAfterGeneration: async (step: { text: string }) => ({ ...step, text: step.text || 'Your canary is noted.' }) },
-      [reply.text(''), ...spare()],
-    );
-
-    const result = await a.session('s1', { userId: 'alice' }).send('My canary is named LARK-7.');
-
-    expect(result.text).toBe('Your canary is noted.');
-    const record = await writeOf(result);
-    const rows = await rowsUnder(storeBrain(a), keyOf('alice'));
-    expect(rows.map((row) => row.content)).toEqual(['My canary is named LARK-7.', 'Your canary is noted.']);
-    expect(record.entries.map((entry) => entry.role)).toEqual(['user', 'assistant']);
-    expect(writtenIds(record)).toEqual(rows.map((row) => row.id));
-  });
-
-  it("a turn its session's close() stops while an onAfterGeneration hook runs files neither side", async () => {
-    let session: { close(): Promise<void> } | undefined;
-    let closing: Promise<void> | undefined;
-    const a = await open(
-      {
-        onAfterGeneration: async (step: { text: string }) => {
-          closing = session!.close();
-          return step;
+    it("a turn its session's close() stops while an onAfterGeneration hook runs files neither side", async () => {
+      let session: { close(): Promise<void> } | undefined;
+      let closing: Promise<void> | undefined;
+      const a = await open(
+        {
+          onAfterGeneration: async (step: { text: string }) => {
+            closing = session!.close();
+            return step;
+          },
         },
-      },
-      [reply.text('A canary, lovely.'), ...spare()],
-    );
-    const s = a.session('s1', { userId: 'alice' });
-    session = s;
+        [reply.text('A canary, lovely.'), ...spare()],
+      );
+      const s = a.session('s1', { userId: 'alice' });
+      session = s;
 
-    await expect(s.send('My canary is named LARK-7.')).rejects.toThrow();
-    await closing;
-    // Long enough for a filing the turn had let through to land.
-    await new Promise((resolve) => setTimeout(resolve, 200));
-
-    expect(await rowsUnder(storeBrain(a), keyOf('alice'))).toEqual([]);
-  });
-
-  it("a registry row that cannot be written again once the trace is stored leaves the side written, and is the mind's failure", async () => {
-    const a = await open({}, [reply.text('A canary, lovely.'), ...spare()]);
-    const brain = storeBrain(a);
-    const key = keyOf('alice');
-    const run = brain.run.bind(brain);
-    let registryWrites = 0;
-    // The second write of her key's registry row, the one after her message's trace is stored, fails once.
-    vi.spyOn(brain, 'run').mockImplementation(((sql: string, params?: unknown[]) => {
-      if (sql.includes('INSERT INTO memory_scopes') && Array.isArray(params) && params.includes(key) && ++registryWrites === 2) {
-        return Promise.reject(new Error('registry write failed'));
-      }
-      return run(sql, params as never);
-    }) as typeof brain.run);
-
-    const record = await writeOf(await a.session('s1', { userId: 'alice' }).send('My canary is named LARK-7.'));
-
-    const rows = await rowsUnder(brain, key);
-    expect(rows.map((row) => row.content)).toEqual(['My canary is named LARK-7.', 'A canary, lovely.']);
-    expect(record).toEqual({
-      entries: [
-        { role: 'user', outcome: 'written', traceId: rows[0].id },
-        { role: 'assistant', outcome: 'written', traceId: rows[1].id },
-      ],
-    });
-    const failures = lines('memory.hook_failed').filter((line) => line.hook === 'soulMemory');
-    expect(failures).toHaveLength(1);
-    expect(JSON.stringify(failures)).not.toMatch(/LARK-7|registry write failed/);
-  });
-
-  it("a turn filed at a time its key's last compile read past is compiled by the next compile", async () => {
-    const a = await open();
-    const key = keyOf('alice');
-    const session = a.session('s1', { userId: 'alice' });
-    await writeOf(await session.send('My canary is named LARK-7.'));
-    await a.memory!.compileWiki({ scopes: [key] });
-    const compiledAt = (await a.memory!.listScopes()).find((row) => row.scopeId === key)?.compiledAt;
-    expect(typeof compiledAt).toBe('number');
-
-    // The clock is set back to the watermark: the next turn's two rows are stamped at a time the compile read past.
-    const clock = vi.spyOn(Date, 'now').mockReturnValue(compiledAt as number);
-    try {
-      await writeOf(await session.send('My canary sings at dawn.'));
-    } finally {
-      clock.mockRestore();
-    }
-    const before = merges().length;
-    await a.memory!.compileWiki({ scopes: [key] });
-
-    expect(merges()).toHaveLength(before + 1);
-    expect(JSON.stringify(merges().at(-1)!.messages)).toContain('sings at dawn');
-  });
-
-  it('a session whose user id no memory key can be built from files nothing', async () => {
-    const managers = managersBuilt();
-    const a = await open({}, [reply.text('Hello.'), ...spare()]);
-    const brain = storeBrain(a);
-    const before = await rowsOf(brain);
-
-    const result = await a.session('s1', { userId: 'odd\uD800id' }).send('My canary is named LARK-7.');
-
-    expect(result.text).toBe('Hello.');
-    expect(await writeOf(result)).toEqual({
-      entries: [
-        { role: 'user', outcome: 'skipped', reason: 'no_subject' },
-        { role: 'assistant', outcome: 'skipped', reason: 'no_subject' },
-      ],
-    });
-    expect(await rowsOf(brain)).toEqual(before);
-    // The mind holds nothing of the turn either.
-    for (const manager of managers()) expect(manager.getStore().listTraces()).toEqual([]);
-  });
-
-  it("close() waits for the mind's writes, and the soul's store is closed once", async () => {
-    const { gate, release } = gated();
-    const a = await open({ pendingWritesTimeoutMs: 10_000 }, [
-      reply.hold([], gate, reply.text('Alice keeps a canary named LARK-7.')),
-      reply.text('In the attic, noted.'),
-      ...spare(),
-    ]);
-    try {
-      const brain = storeBrain(a);
-      const brainClose = vi.spyOn(brain, 'close');
-      const shutDown = vi.spyOn(CognitiveMemoryManager.prototype, 'shutdown');
-      // Something of hers for a compile to fold: its model call holds her chain, and her writes wait behind it.
-      await a.memory!.remember('Alice keeps a canary named LARK-7.', { type: 'episodic', scope: 'conversation', scopeId: keyOf('alice') });
-      const compiling = a.memory!.compileWiki({ scopes: [keyOf('alice')] });
-      await vi.waitFor(() => expect(served.seen).toHaveLength(1), { timeout: 4_000 });
-
-      const result = await a.session('s1', { userId: 'alice' }).send('I keep it in the attic.');
-      expect(result.text).toBe('In the attic, noted.');
-      const write = writeOf(result);
-      expect(await settledWithin(write, 200)).toBe(false);
-
-      ownClose(a);
-      const closing = a.close();
-      // The mind's memory does not shut down while the mind's writes wait.
-      expect(await settledWithin(closing, 300)).toBe(false);
-      expect(shutDown).not.toHaveBeenCalled();
-      release();
-      await compiling;
+      await expect(s.send('My canary is named LARK-7.')).rejects.toThrow();
       await closing;
+      // Long enough for a filing the turn had let through to land.
+      await new Promise((resolve) => setTimeout(resolve, 200));
 
-      const record = await write;
+      expect(await rowsUnder(storeBrain(a), keyOf('alice'))).toEqual([]);
+    });
+
+    it("a registry row that cannot be written again once the trace is stored leaves the side written, and is the mind's failure", async () => {
+      const a = await open({}, [reply.text('A canary, lovely.'), ...spare()]);
+      const brain = storeBrain(a);
+      const key = keyOf('alice');
+      const run = brain.run.bind(brain);
+      let registryWrites = 0;
+      // The second write of her key's registry row, the one after her message's trace is stored, fails once.
+      vi.spyOn(brain, 'run').mockImplementation(((sql: string, params?: unknown[]) => {
+        if (sql.includes('INSERT INTO memory_scopes') && Array.isArray(params) && params.includes(key) && ++registryWrites === 2) {
+          return Promise.reject(new Error('registry write failed'));
+        }
+        return run(sql, params as never);
+      }) as typeof brain.run);
+
+      const record = await writeOf(await a.session('s1', { userId: 'alice' }).send('My canary is named LARK-7.'));
+
+      const rows = await rowsUnder(brain, key);
+      expect(rows.map((row) => row.content)).toEqual(['My canary is named LARK-7.', 'A canary, lovely.']);
+      expect(record).toEqual({
+        entries: [
+          { role: 'user', outcome: 'written', traceId: rows[0].id },
+          { role: 'assistant', outcome: 'written', traceId: rows[1].id },
+        ],
+      });
+      const failures = lines('memory.hook_failed').filter((line) => line.hook === 'soulMemory');
+      expect(failures).toHaveLength(1);
+      expect(JSON.stringify(failures)).not.toMatch(/LARK-7|registry write failed/);
+    });
+
+    it("a turn filed at a time its key's last compile read past is compiled by the next compile", async () => {
+      const a = await open();
+      const key = keyOf('alice');
+      const session = a.session('s1', { userId: 'alice' });
+      await writeOf(await session.send('My canary is named LARK-7.'));
+      await a.memory!.compileWiki({ scopes: [key] });
+      const compiledAt = (await a.memory!.listScopes()).find((row) => row.scopeId === key)?.compiledAt;
+      expect(typeof compiledAt).toBe('number');
+
+      // The clock is set back to the watermark: the next turn's two rows are stamped at a time the compile read past.
+      const clock = vi.spyOn(Date, 'now').mockReturnValue(compiledAt as number);
+      try {
+        await writeOf(await session.send('My canary sings at dawn.'));
+      } finally {
+        clock.mockRestore();
+      }
+      const before = merges().length;
+      await a.memory!.compileWiki({ scopes: [key] });
+
+      expect(merges()).toHaveLength(before + 1);
+      expect(JSON.stringify(merges().at(-1)!.messages)).toContain('sings at dawn');
+    });
+
+    it('a session whose user id no memory key can be built from files nothing', async () => {
+      const managers = managersBuilt();
+      const a = await open({}, [reply.text('Hello.'), ...spare()]);
+      const brain = storeBrain(a);
+      const before = await rowsOf(brain);
+
+      const result = await a.session('s1', { userId: 'odd\uD800id' }).send('My canary is named LARK-7.');
+
+      expect(result.text).toBe('Hello.');
+      expect(await writeOf(result)).toEqual({
+        entries: [
+          { role: 'user', outcome: 'skipped', reason: 'no_subject' },
+          { role: 'assistant', outcome: 'skipped', reason: 'no_subject' },
+        ],
+      });
+      expect(await rowsOf(brain)).toEqual(before);
+      // The mind holds nothing of the turn either.
+      for (const manager of managers()) expect(manager.getStore().listTraces()).toEqual([]);
+    });
+
+    it("close() waits for the mind's writes, and the soul's store is closed once", async () => {
+      const { gate, release } = gated();
+      const a = await open({ pendingWritesTimeoutMs: 10_000 }, [
+        reply.hold([], gate, reply.text('Alice keeps a canary named LARK-7.')),
+        reply.text('In the attic, noted.'),
+        ...spare(),
+      ]);
+      try {
+        const brain = storeBrain(a);
+        const brainClose = vi.spyOn(brain, 'close');
+        const shutDown = vi.spyOn(CognitiveMemoryManager.prototype, 'shutdown');
+        // Something of hers for a compile to fold: its model call holds her chain, and her writes wait behind it.
+        await a.memory!.remember('Alice keeps a canary named LARK-7.', { type: 'episodic', scope: 'conversation', scopeId: keyOf('alice') });
+        const compiling = a.memory!.compileWiki({ scopes: [keyOf('alice')] });
+        await vi.waitFor(() => expect(served.seen).toHaveLength(1), { timeout: 4_000 });
+
+        const result = await a.session('s1', { userId: 'alice' }).send('I keep it in the attic.');
+        expect(result.text).toBe('In the attic, noted.');
+        const write = writeOf(result);
+        expect(await settledWithin(write, 200)).toBe(false);
+
+        ownClose(a);
+        const closing = a.close();
+        // The mind's memory does not shut down while the mind's writes wait.
+        expect(await settledWithin(closing, 300)).toBe(false);
+        expect(shutDown).not.toHaveBeenCalled();
+        release();
+        await compiling;
+        await closing;
+
+        const record = await write;
+        expect(record.entries.map((entry) => entry.outcome)).toEqual(['written', 'written']);
+        expect(shutDown).toHaveBeenCalled();
+        expect(brainClose).toHaveBeenCalledTimes(1);
+      } finally {
+        release();
+      }
+    });
+
+    it('a memory that does not build fails the turn, and the next turn builds it again', async () => {
+      const a = await open({}, [reply.text('Tea, noted.'), ...spare()]);
+      embeddings.initThrows = new Error('embedding provider unavailable');
+
+      await expect(a.session('s1', { userId: 'alice' }).send('My canary is named LARK-7.')).rejects.toThrow(/memory\.embedding/);
+      expect(await rowsUnder(storeBrain(a), keyOf('alice'))).toEqual([]);
+
+      embeddings.initThrows = undefined;
+      const record = await writeOf(await a.session('s1', { userId: 'alice' }).send('I drink tea.'));
       expect(record.entries.map((entry) => entry.outcome)).toEqual(['written', 'written']);
-      expect(shutDown).toHaveBeenCalled();
-      expect(brainClose).toHaveBeenCalledTimes(1);
-    } finally {
-      release();
-    }
-  });
-
-  it('a memory that does not build fails the turn, and the next turn builds it again', async () => {
-    const a = await open({}, [reply.text('Tea, noted.'), ...spare()]);
-    embeddings.initThrows = new Error('embedding provider unavailable');
-
-    await expect(a.session('s1', { userId: 'alice' }).send('My canary is named LARK-7.')).rejects.toThrow(/memory\.embedding/);
-    expect(await rowsUnder(storeBrain(a), keyOf('alice'))).toEqual([]);
-
-    embeddings.initThrows = undefined;
-    const record = await writeOf(await a.session('s1', { userId: 'alice' }).send('I drink tea.'));
-    expect(record.entries.map((entry) => entry.outcome)).toEqual(['written', 'written']);
-    const rows = await rowsUnder(storeBrain(a), keyOf('alice'));
-    expect(rows.map((row) => metaOf(row).filedBy)).toEqual(['mind', 'mind']);
+      const rows = await rowsUnder(storeBrain(a), keyOf('alice'));
+      expect(rows.map((row) => metaOf(row).filedBy)).toEqual(['mind', 'mind']);
+    });
   });
 });

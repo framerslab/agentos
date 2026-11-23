@@ -58,9 +58,16 @@ import type { IMemoryArchive } from '../../cognition/memory/archive/IMemoryArchi
 import { GMI } from '../../cognition/substrate/GMI';
 import { MemoryStore } from '../../cognition/memory/retrieval/store/MemoryStore';
 
-/** The runtimes the cases run on: the default one, and the GMI runtime with cognitive memory off. */
-const RUNTIMES = ['legacy', 'gmi'] as const;
-type Runtime = (typeof RUNTIMES)[number];
+/**
+ * The runtimes the cases run on, each as its name and the `runtime` option that selects it: the legacy runtime, the
+ * GMI runtime with cognitive memory off, and no `runtime` at all.
+ */
+const RUNTIMES = [
+  ['legacy', 'legacy'],
+  ['gmi', 'gmi'],
+  ["unset, souledAgent()'s default", undefined],
+] as const;
+type Runtime = (typeof RUNTIMES)[number][1];
 
 let n = 0;
 let dir: string;
@@ -214,7 +221,7 @@ function gated(): { gate: Promise<void>; release: () => void } {
 const correct = (a: SouledAgent, userId: string, traceIds: readonly string[], text?: string) =>
   a.correctUserMemory!(userId, text === undefined ? { traceIds } : { traceIds, text });
 
-describe.each(RUNTIMES)('deleting or correcting one memory, on runtime %s', (runtime) => {
+describe.each(RUNTIMES)('deleting or correcting one memory, on runtime %s', (_name, runtime) => {
   it('one of two memories is deleted, and nothing is filed', async () => {
     const a = await open(runtime, [
       reply.text('A canary, lovely.'),
@@ -505,7 +512,7 @@ describe.each(RUNTIMES)('deleting or correcting one memory, on runtime %s', (run
   });
 });
 
-describe.each(RUNTIMES)('a correction kept through a restore, on runtime %s', (runtime) => {
+describe.each(RUNTIMES)('a correction kept through a restore, on runtime %s', (_name, runtime) => {
   it('a restore from before a correction brings back neither the old text nor loses the correction', async () => {
     const a = await open(runtime, [reply.text('A canary, lovely.'), reply.text('The user keeps a canary named LARK-7.'), ...spare()]);
     await turn(a, 's1', 'alice', 'My canary is LARK-7.');

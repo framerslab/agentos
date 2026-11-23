@@ -2,7 +2,8 @@
  * What the host's memory policy answers for a minor and for a person who objects to profiling, and which answer a
  * session follows, end to end over the real souledAgent(), agent, generateText, provider manager, Memory store and
  * wiki compiler; only the OpenAI and Anthropic provider classes are stubbed (helpers/stubProviders.ts), at their
- * module boundary. Every case runs on the default runtime and on `runtime: 'gmi'` with cognitive memory off.
+ * module boundary. Every case runs on the legacy runtime, on `runtime: 'gmi'` with cognitive memory off, and with no
+ * `runtime` set, which is souledAgent()'s default.
  *
  * - `minor: true` on a store that keeps the person's memory until deletion, or on an agent with no `retention`, keeps
  *   no long-term memory for them, whatever `retentionDays` the answer holds: nothing of their turns is filed, they
@@ -48,8 +49,15 @@ import { GMI } from '../../cognition/substrate/GMI';
 import type { MemoryTrace } from '../../cognition/memory/core/types';
 import type { MemoryWriteRecord } from '../runtime/memoryWriteRecord';
 
-/** The runtimes every case runs on: the default runtime, and the GMI runtime with cognitive memory off. */
-const RUNTIMES = ['legacy', 'gmi'] as const;
+/**
+ * The runtimes every case runs on, each as its name and the `runtime` option that selects it: the legacy runtime, the
+ * GMI runtime with cognitive memory off, and no `runtime` at all.
+ */
+const RUNTIMES = [
+  ['legacy', 'legacy'],
+  ['gmi', 'gmi'],
+  ["unset, souledAgent()'s default", undefined],
+] as const;
 
 /** The operator's page every case's folder holds, and the line of it a recall shows. */
 const OPS_LINE = 'Open nine to five.';
@@ -133,7 +141,7 @@ const recalledIn = (call: ModelCall): string[] => {
   return items.map((item) => item.text.replaceAll('^', ' '));
 };
 
-describe.each(RUNTIMES)('policy answers, on runtime %s', (runtime) => {
+describe.each(RUNTIMES)('policy answers, on runtime %s', (_name, runtime) => {
   /** A souled agent on the stubbed OpenAI provider, on `runtime`, with a script of its own. */
   async function open(extra: Partial<SouledAgentOptions> = {}): Promise<{ a: SouledAgent; s: ProviderScript }> {
     const apiKey = `k-souled-policy-answers-${++n}`;

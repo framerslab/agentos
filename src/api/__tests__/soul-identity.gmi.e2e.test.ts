@@ -128,13 +128,13 @@ describe('a soul that fails to load', () => {
   });
 });
 
-/** The agent built on the soul folder by each way that runs on the default runtime. */
+/** The agent built on the soul folder by each way that runs on the legacy runtime: agent()'s default, and souledAgent()'s setting. */
 const plainPaths = [
   ['agent({ soul })', async (k: string, extra: Record<string, unknown> = {}) => agent(stubbed(k, { soul: dir, ...extra }))],
-  ['souledAgent()', async (k: string, extra: Record<string, unknown> = {}) => souledAgent({ ...stubbed(k, extra), soul: dir } as never)],
+  ["souledAgent({ runtime: 'legacy' })", async (k: string, extra: Record<string, unknown> = {}) => souledAgent({ ...stubbed(k, { runtime: 'legacy', ...extra }), soul: dir } as never)],
 ] as const;
 
-describe("a soul's hard limits, traits and name on the default runtime", () => {
+describe("a soul's hard limits, traits and name on the legacy runtime", () => {
   // One turn on a new store: the wiki's recall block is still a system message, so a turn that recalled something
   // would have that block after the limits until recalled text leaves the system role.
   it.each(plainPaths)('%s: the last system text of the model call is the hard-limits block', async (_name, build) => {
@@ -240,6 +240,8 @@ describe("a soul's identity on the GMI path", () => {
   it.each([
     ["agent({ runtime: 'gmi', soul })", async (k: string) => agent(stubbed(k, { runtime: 'gmi', soul: dir }))],
     ["souledAgent({ runtime: 'gmi' })", async (k: string) => souledAgent({ ...stubbed(k, { runtime: 'gmi' }), soul: dir } as never)],
+    // No runtime: souledAgent()'s default.
+    ['souledAgent()', async (k: string) => souledAgent({ ...stubbed(k), soul: dir } as never)],
   ] as const)('%s: the system text of every model call ends with the hard-limits block, and holds the trait paragraph once', async (_name, build) => {
     writeSoul(FULL);
     const k = key();
@@ -305,7 +307,7 @@ describe("the soul's id as the agent's key", () => {
   /** The key the turns of the session `s` are filed under for an agent of that id. */
   const sessionKeyOf = (agentId: string) => conversationScopeKey(agentId, { kind: 'session', id: 's' });
 
-  it.each([['the default runtime', {}], ["runtime: 'gmi'", { runtime: 'gmi' }]] as const)(
+  it.each([['the default runtime', {}], ["runtime: 'gmi'", { runtime: 'gmi' }], ["runtime: 'legacy'", { runtime: 'legacy' }]] as const)(
     'souledAgent() on %s files its turns under the soul agentId, whatever the agent is named',
     async (_name, extra) => {
       writeSoul(FULL);

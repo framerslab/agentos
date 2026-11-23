@@ -1,5 +1,5 @@
 /** Recall detail through the real soul, GMI, cognitive memory manager and store. Only the model provider is stubbed. */
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -19,7 +19,16 @@ vi.mock('../../core/llm/providers/implementations/AnthropicProvider', async () =
   AnthropicProvider: (await import('./helpers/stubProviders')).stubProviderClass('anthropic'),
 }));
 
-const RUNTIME = 'gmi' as const;
+/**
+ * The runtimes every case runs on, each as the options that select it: `runtime: 'gmi'`, and no `runtime` at all,
+ * which is souledAgent()'s default.
+ */
+const RUNTIMES = [
+  ["runtime: 'gmi'", { runtime: 'gmi' }],
+  ['no runtime set', {}],
+] as const;
+/** The runtime options of the suite that is running: each suite of the runtimes sets them before its cases. */
+let RUNTIME: (typeof RUNTIMES)[number][1] = RUNTIMES[0][1];
 const AGENT = 'recall-detail';
 const USER = 'reader';
 const POSTGRES_URL = process.env.AGENTOS_TEST_POSTGRES_URL;
@@ -64,7 +73,7 @@ function route() {
 async function open(recall?: MemoryRecallConfig, store: Partial<SouledAgentOptions> = {}) {
   const agent = await souledAgent({
     ...route(),
-    runtime: RUNTIME,
+    ...RUNTIME,
     soul: dir,
     compile: false,
     retention: { traces: 'until-deletion' },
@@ -165,126 +174,132 @@ async function expectRecallDetail(store?: Pick<SouledAgentOptions, 'soulStore' |
   expect(after.traces.map(({ text }) => text)).toContain(MIND_USER);
 }
 
-describe('recall detail on a souled agent', () => {
-  it('records metadata by default without exposing recall text in the result', async () => {
-    const agent = await open();
-    await fileMemories(agent);
-    const result = await agent.session('reader', { userId: USER }).send(QUESTION);
-    const blocks = blocksOfLastCall();
-    expect(blocks.mind).toContain(MIND_USER);
-    expect(blocks.provider).toContain(PROVIDER.replace(/ /g, '^'));
-    expect(result.memoryRecall?.candidates.some(({ outcome }) => outcome === 'included')).toBe(true);
-    expect(result.memoryShown).toBeUndefined();
-    expectNoMemoryText(result);
-    expectNoMemoryText(result.memoryRecall);
+describe.each(RUNTIMES)('with %s', (_name, runtime) => {
+  beforeAll(() => {
+    RUNTIME = runtime;
   });
 
-  it('returns what both blocks showed and provides the id for deleting a provider trace', async () => {
-    await expectRecallDetail();
-  });
-
-  it.runIf(Boolean(POSTGRES_URL))('returns both sources and supports deletion on PostgreSQL', async () => {
-    const schema = `souled_recall_detail_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
-    const adapter = createPostgresAdapter({ connectionString: POSTGRES_URL!, segment: schema, max: 5, typeParsers: { int8: 'number' } });
-    const admin = createPostgresAdapter({ connectionString: POSTGRES_URL! });
-    await adapter.open();
-    opened.push({
-      close: async () => {
-        await adapter.close();
-        await admin.open();
-        try {
-          await admin.exec(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`);
-        } finally {
-          await admin.close();
-        }
-      },
+  describe('recall detail on a souled agent', () => {
+    it('records metadata by default without exposing recall text in the result', async () => {
+      const agent = await open();
+      await fileMemories(agent);
+      const result = await agent.session('reader', { userId: USER }).send(QUESTION);
+      const blocks = blocksOfLastCall();
+      expect(blocks.mind).toContain(MIND_USER);
+      expect(blocks.provider).toContain(PROVIDER.replace(/ /g, '^'));
+      expect(result.memoryRecall?.candidates.some(({ outcome }) => outcome === 'included')).toBe(true);
+      expect(result.memoryShown).toBeUndefined();
+      expectNoMemoryText(result);
+      expectNoMemoryText(result.memoryRecall);
     });
-    await expectRecallDetail({ soulStore: { adapter }, tombstoneCopy: { path: path.join(dir, 'forgotten.sqlite') } });
-  });
 
-  it('resolves the same detail through the stream result after the stream ends', async () => {
-    const agent = await open({ capture: DETAIL });
-    await fileMemories(agent);
-    const send = await agent.session('reader', { userId: USER }).send(QUESTION);
-    const stream = agent.session('stream-reader', { userId: USER }).stream(QUESTION);
-    const shown = stream.memoryShown;
-    expect(shown).toBeInstanceOf(Promise);
-    const parts = [];
-    for await (const part of stream.fullStream) parts.push(part);
-    expect(await stream.text).toBe(REPLY);
-    expect(send.memoryShown?.length).toBeGreaterThan(0);
-    expect(await shown).toEqual(send.memoryShown);
-    expectNoMemoryText(parts);
-  });
-
-  it('keeps recall text out of stream parts under metadata streaming', async () => {
-    const agent = await open({ capture: 'metadata+stream' });
-    await fileMemories(agent);
-    const result = agent.session('reader', { userId: USER }).stream(QUESTION);
-    const parts = [];
-    for await (const part of result.fullStream) parts.push(part);
-    expect(blocksOfLastCall().mind).toContain(MIND_USER);
-    expect(await result.memoryRecall).toBeDefined();
-    expect(result.memoryShown).toBeUndefined();
-    expectNoMemoryText(parts);
-    expectNoMemoryText(await result.memoryRecall);
-  });
-
-  it('lists what the serving fallback hop was sent when a hook leaves the provider block out there', async () => {
-    const fallbackKey = `k-recall-detail-fallback-${++serial}`;
-    const fallback = script('anthropic', fallbackKey, { whole: true, replies: [reply.text(REPLY)] });
-    vi.stubEnv('ANTHROPIC_API_KEY', fallbackKey);
-    const agent = await open({ capture: DETAIL }, {
-      fallbackProviders: [{ provider: 'anthropic', model: 'claude-x' }],
-      onBeforeGeneration: async (context) =>
-        context.provider === 'anthropic'
-          ? { ...context, messages: context.messages.filter(({ content }) => !(typeof content === 'string' && content.startsWith('<memory_recall>'))) }
-          : undefined,
+    it('returns what both blocks showed and provides the id for deleting a provider trace', async () => {
+      await expectRecallDetail();
     });
-    // The reader's first hop fails before any output; the fallback serves the turn.
-    served.replies.splice(1, 1, Object.assign(new Error('overloaded'), { httpStatus: 529 }));
-    await fileMemories(agent);
-    const result = await agent.session('reader', { userId: USER }).send(QUESTION);
 
-    expect(result.provider).toBe('anthropic');
-    expect(blocksOfLastCall(served).provider).toContain(PROVIDER.replace(/ /g, '^'));
-    const sent = blocksOfLastCall(fallback);
-    expect(sent.provider).toBe('');
-    expect(sent.mind).toContain(MIND_USER);
-    const includedIds = result.memoryRecall?.candidates.filter(({ outcome }) => outcome === 'included').map(({ id }) => id) ?? [];
-    expect(includedIds.length).toBeGreaterThan(0);
-    expect(result.memoryShown?.map(({ source, id }) => ({ source, id }))).toEqual(includedIds.map((id) => ({ source: 'memory', id })));
-    for (const item of result.memoryShown ?? []) expect(sent.mind).toContain(item.text);
-  });
+    it.runIf(Boolean(POSTGRES_URL))('returns both sources and supports deletion on PostgreSQL', async () => {
+      const schema = `souled_recall_detail_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
+      const adapter = createPostgresAdapter({ connectionString: POSTGRES_URL!, segment: schema, max: 5, typeParsers: { int8: 'number' } });
+      const admin = createPostgresAdapter({ connectionString: POSTGRES_URL! });
+      await adapter.open();
+      opened.push({
+        close: async () => {
+          await adapter.close();
+          await admin.open();
+          try {
+            await admin.exec(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`);
+          } finally {
+            await admin.close();
+          }
+        },
+      });
+      await expectRecallDetail({ soulStore: { adapter }, tombstoneCopy: { path: path.join(dir, 'forgotten.sqlite') } });
+    });
 
-  it('keeps what both blocks showed in the stream result when the reply breaks after it starts', async () => {
-    const agent = await open({ capture: DETAIL });
-    served.replies.splice(1, 1, reply.breakAfterFirstDelta('I re'));
-    await fileMemories(agent);
-    const stream = agent.session('reader', { userId: USER }).stream(QUESTION);
-    const parts = [];
-    for await (const part of stream.fullStream) parts.push(part);
+    it('resolves the same detail through the stream result after the stream ends', async () => {
+      const agent = await open({ capture: DETAIL });
+      await fileMemories(agent);
+      const send = await agent.session('reader', { userId: USER }).send(QUESTION);
+      const stream = agent.session('stream-reader', { userId: USER }).stream(QUESTION);
+      const shown = stream.memoryShown;
+      expect(shown).toBeInstanceOf(Promise);
+      const parts = [];
+      for await (const part of stream.fullStream) parts.push(part);
+      expect(await stream.text).toBe(REPLY);
+      expect(send.memoryShown?.length).toBeGreaterThan(0);
+      expect(await shown).toEqual(send.memoryShown);
+      expectNoMemoryText(parts);
+    });
 
-    expect(parts.at(-1)?.type).toBe('error');
-    expect(await stream.text).toBe('I re');
-    const blocks = blocksOfLastCall();
-    expect(blocks.mind).toContain(MIND_USER);
-    expect(blocks.provider).toContain(PROVIDER.replace(/ /g, '^'));
-    const includedIds = (await stream.memoryRecall)?.candidates.filter(({ outcome }) => outcome === 'included').map(({ id }) => id) ?? [];
-    expect(includedIds.length).toBeGreaterThan(0);
-    const shown = await stream.memoryShown;
-    expect(shown?.filter(({ source }) => source === 'memory').map(({ id }) => id)).toEqual(includedIds);
-    expect(shown?.filter(({ source }) => source === 'provider').map(({ text }) => text).sort()).toEqual([PAGE, PROVIDER].sort());
-    expectNoMemoryText(parts);
-  });
+    it('keeps recall text out of stream parts under metadata streaming', async () => {
+      const agent = await open({ capture: 'metadata+stream' });
+      await fileMemories(agent);
+      const result = agent.session('reader', { userId: USER }).stream(QUESTION);
+      const parts = [];
+      for await (const part of result.fullStream) parts.push(part);
+      expect(blocksOfLastCall().mind).toContain(MIND_USER);
+      expect(await result.memoryRecall).toBeDefined();
+      expect(result.memoryShown).toBeUndefined();
+      expectNoMemoryText(parts);
+      expectNoMemoryText(await result.memoryRecall);
+    });
 
-  it('leaves recall detail absent when the turn sends no memory block', async () => {
-    const agent = await open({ capture: DETAIL, budget: { totalTokens: 0 } });
-    const result = await agent.session('empty', { userId: USER }).send(QUESTION);
-    expect(blocksOfLastCall()).toEqual({ mind: '', provider: '' });
-    expect(result.memoryShown).toBeUndefined();
-    const stream = agent.session('empty-stream', { userId: USER }).stream(QUESTION);
-    expect(await stream.memoryShown).toEqual([]);
+    it('lists what the serving fallback hop was sent when a hook leaves the provider block out there', async () => {
+      const fallbackKey = `k-recall-detail-fallback-${++serial}`;
+      const fallback = script('anthropic', fallbackKey, { whole: true, replies: [reply.text(REPLY)] });
+      vi.stubEnv('ANTHROPIC_API_KEY', fallbackKey);
+      const agent = await open({ capture: DETAIL }, {
+        fallbackProviders: [{ provider: 'anthropic', model: 'claude-x' }],
+        onBeforeGeneration: async (context) =>
+          context.provider === 'anthropic'
+            ? { ...context, messages: context.messages.filter(({ content }) => !(typeof content === 'string' && content.startsWith('<memory_recall>'))) }
+            : undefined,
+      });
+      // The reader's first hop fails before any output; the fallback serves the turn.
+      served.replies.splice(1, 1, Object.assign(new Error('overloaded'), { httpStatus: 529 }));
+      await fileMemories(agent);
+      const result = await agent.session('reader', { userId: USER }).send(QUESTION);
+
+      expect(result.provider).toBe('anthropic');
+      expect(blocksOfLastCall(served).provider).toContain(PROVIDER.replace(/ /g, '^'));
+      const sent = blocksOfLastCall(fallback);
+      expect(sent.provider).toBe('');
+      expect(sent.mind).toContain(MIND_USER);
+      const includedIds = result.memoryRecall?.candidates.filter(({ outcome }) => outcome === 'included').map(({ id }) => id) ?? [];
+      expect(includedIds.length).toBeGreaterThan(0);
+      expect(result.memoryShown?.map(({ source, id }) => ({ source, id }))).toEqual(includedIds.map((id) => ({ source: 'memory', id })));
+      for (const item of result.memoryShown ?? []) expect(sent.mind).toContain(item.text);
+    });
+
+    it('keeps what both blocks showed in the stream result when the reply breaks after it starts', async () => {
+      const agent = await open({ capture: DETAIL });
+      served.replies.splice(1, 1, reply.breakAfterFirstDelta('I re'));
+      await fileMemories(agent);
+      const stream = agent.session('reader', { userId: USER }).stream(QUESTION);
+      const parts = [];
+      for await (const part of stream.fullStream) parts.push(part);
+
+      expect(parts.at(-1)?.type).toBe('error');
+      expect(await stream.text).toBe('I re');
+      const blocks = blocksOfLastCall();
+      expect(blocks.mind).toContain(MIND_USER);
+      expect(blocks.provider).toContain(PROVIDER.replace(/ /g, '^'));
+      const includedIds = (await stream.memoryRecall)?.candidates.filter(({ outcome }) => outcome === 'included').map(({ id }) => id) ?? [];
+      expect(includedIds.length).toBeGreaterThan(0);
+      const shown = await stream.memoryShown;
+      expect(shown?.filter(({ source }) => source === 'memory').map(({ id }) => id)).toEqual(includedIds);
+      expect(shown?.filter(({ source }) => source === 'provider').map(({ text }) => text).sort()).toEqual([PAGE, PROVIDER].sort());
+      expectNoMemoryText(parts);
+    });
+
+    it('leaves recall detail absent when the turn sends no memory block', async () => {
+      const agent = await open({ capture: DETAIL, budget: { totalTokens: 0 } });
+      const result = await agent.session('empty', { userId: USER }).send(QUESTION);
+      expect(blocksOfLastCall()).toEqual({ mind: '', provider: '' });
+      expect(result.memoryShown).toBeUndefined();
+      const stream = agent.session('empty-stream', { userId: USER }).stream(QUESTION);
+      expect(await stream.memoryShown).toEqual([]);
+    });
   });
 });
 

@@ -9,7 +9,7 @@
  * - `close()` says what it left through the host's logger and never the console: the turns and writes still pending at
  *   its deadline, a sweep that failed, a compile that failed, each with no text.
  */
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 vi.mock('../../core/llm/providers/implementations/OpenAIProvider', async () => ({ OpenAIProvider: (await import('./helpers/stubProviders')).stubProviderClass('openai') }));
 import { createHash } from 'node:crypto';
 import * as fs from 'node:fs';
@@ -27,8 +27,16 @@ import { resetLoggerFactory, setLogger } from '../../core/logging/loggerFactory'
 import { globalLLMProviderHealth } from '../../core/safety/LLMProviderHealthRegistry';
 import type { MemoryWriteRecord } from '../runtime/memoryWriteRecord';
 
-/** The runtime every case runs on. */
-const RUNTIME = 'gmi' as const;
+/**
+ * The runtimes every case runs on, each as the options that select it: `runtime: 'gmi'`, and no `runtime` at all,
+ * which is souledAgent()'s default.
+ */
+const RUNTIMES = [
+  ["runtime: 'gmi'", { runtime: 'gmi' }],
+  ['no runtime set', {}],
+] as const;
+/** The runtime options of the suite that is running: each suite of the runtimes sets them before its cases. */
+let RUNTIME: (typeof RUNTIMES)[number][1] = RUNTIMES[0][1];
 /** Cognitive memory on, embedding through OpenAI, with no mechanism that rewrites a stored row. */
 const COGNITIVE = { cognition: { memory: { embedding: { provider: 'openai' } }, mechanisms: false } };
 const DAY = 86_400_000;
@@ -81,7 +89,7 @@ async function open(extra: Record<string, unknown> = {}, replies: ProviderScript
   const apiKey = `k-souled-retention-gmi-${++n}`;
   script('openai', apiKey, { whole: true, replies });
   const a = await souledAgent({
-    runtime: RUNTIME,
+    ...RUNTIME,
     provider: 'openai',
     model: 'stub-model',
     apiKey,
@@ -184,154 +192,160 @@ function gated(): { gate: Promise<void>; release: () => void } {
   return { gate, release };
 }
 
-describe.each(['agent.sweepRetention()', 'close()'] as const)('retention on a souled agent on the GMI runtime, run by %s', (by) => {
-  it("leaves no trace, archived original, graph node or session slot of a person's expired memory", async () => {
-    vi.useFakeTimers({ toFake: ['Date'] });
-    const start = Date.now();
-    const managers = managersBuilt();
-    const gmis = builtGmis();
-    const a = await open({}, [reply.text('A canary, lovely.'), ...spare()]);
-    await writeOf(await a.session('s1', { userId: 'alice' }).send('My canary is named LARK-7.'));
-    // What she told the soul's provider: a row of her key with no mark of the mind.
-    const told = await a.memory!.remember('Alice keeps a ferret named QUILL-9.', { type: 'episodic', scope: 'conversation', scopeId: keyOf('alice') });
-    const hers = rowsUnder(keyOf('alice'));
-    const herIds = hers.map((row) => row.id);
-    const herMindIds = hers.filter((row) => metaOf(row).filedBy === 'mind').map((row) => row.id).sort();
-    expect(hers).toHaveLength(3);
-    expect(herMindIds).toHaveLength(2);
-    expect(managers()).toHaveLength(1);
-    const manager = managers()[0];
-    await plantOriginal(manager.getConfig().archive!, herMindIds[0], 'My canary is named LARK-7, the yellow one.');
-    expect(archivedAmong(herIds)).toEqual([herMindIds[0]]);
-    expect(graphNodesAmong([told.id])).toEqual([told.id]);
-    expect(heldBy(manager, herMindIds)).toEqual({ cached: herMindIds, nodes: herMindIds, words: true });
-    expect(gmis).toHaveLength(1);
-    expect(slotsOf(gmis[0])).toEqual(expect.arrayContaining(herMindIds));
+describe.each(RUNTIMES)('with %s', (_name, runtime) => {
+  beforeAll(() => {
+    RUNTIME = runtime;
+  });
 
-    // Two days on, every trace of hers is past the one day her memory is kept.
-    vi.setSystemTime(start + 2 * DAY);
-    if (by === 'agent.sweepRetention()') {
-      expect(await a.sweepRetention!()).toMatchObject({ traces: 3 });
-      // Nothing of hers in the mind, and no slot of hers in her open session.
-      expect(heldBy(manager, herIds)).toEqual({ cached: [], nodes: [], words: false });
-      expect(slotsOf(gmis[0]).filter((id) => herIds.includes(id))).toEqual([]);
-    } else {
+  describe.each(['agent.sweepRetention()', 'close()'] as const)('retention on a souled agent on the GMI runtime, run by %s', (by) => {
+    it("leaves no trace, archived original, graph node or session slot of a person's expired memory", async () => {
+      vi.useFakeTimers({ toFake: ['Date'] });
+      const start = Date.now();
+      const managers = managersBuilt();
+      const gmis = builtGmis();
+      const a = await open({}, [reply.text('A canary, lovely.'), ...spare()]);
+      await writeOf(await a.session('s1', { userId: 'alice' }).send('My canary is named LARK-7.'));
+      // What she told the soul's provider: a row of her key with no mark of the mind.
+      const told = await a.memory!.remember('Alice keeps a ferret named QUILL-9.', { type: 'episodic', scope: 'conversation', scopeId: keyOf('alice') });
+      const hers = rowsUnder(keyOf('alice'));
+      const herIds = hers.map((row) => row.id);
+      const herMindIds = hers.filter((row) => metaOf(row).filedBy === 'mind').map((row) => row.id).sort();
+      expect(hers).toHaveLength(3);
+      expect(herMindIds).toHaveLength(2);
+      expect(managers()).toHaveLength(1);
+      const manager = managers()[0];
+      await plantOriginal(manager.getConfig().archive!, herMindIds[0], 'My canary is named LARK-7, the yellow one.');
+      expect(archivedAmong(herIds)).toEqual([herMindIds[0]]);
+      expect(graphNodesAmong([told.id])).toEqual([told.id]);
+      expect(heldBy(manager, herMindIds)).toEqual({ cached: herMindIds, nodes: herMindIds, words: true });
+      expect(gmis).toHaveLength(1);
+      expect(slotsOf(gmis[0])).toEqual(expect.arrayContaining(herMindIds));
+
+      // Two days on, every trace of hers is past the one day her memory is kept.
+      vi.setSystemTime(start + 2 * DAY);
+      if (by === 'agent.sweepRetention()') {
+        expect(await a.sweepRetention!()).toMatchObject({ traces: 3 });
+        // Nothing of hers in the mind, and no slot of hers in her open session.
+        expect(heldBy(manager, herIds)).toEqual({ cached: [], nodes: [], words: false });
+        expect(slotsOf(gmis[0]).filter((id) => herIds.includes(id))).toEqual([]);
+      } else {
+        await closed(a);
+      }
+
+      expect(rowsUnder(keyOf('alice'))).toEqual([]);
+      expect(archivedAmong(herIds)).toEqual([]);
+      expect(graphNodesAmong(herIds)).toEqual([]);
+      expect(lines('memory.retention_swept')).toEqual([expect.objectContaining({ traces: 3 })]);
+    });
+  });
+
+  describe('close() on a souled agent on the GMI runtime', () => {
+    it("compiles the mind's turns with their speakers into each person's own page", async () => {
+      const aliceSaid = 'My canary is named LARK-7.';
+      const ariaAnswered = 'A canary, lovely.';
+      const bobSaid = 'My finch is named WREN-2.';
+      const compileKey = `k-souled-retention-gmi-compile-${++n}`;
+      const compiler = script('openai', compileKey, {
+        whole: true,
+        replies: [reply.text('A note about the conversation.'), reply.text('A note about the conversation.')],
+      });
+      const a = await open(
+        { tombstoneKey: 'k-souled-retention-gmi-tombstones', compile: { provider: 'openai', model: 'stub-model', apiKey: compileKey } },
+        [reply.text(ariaAnswered), reply.text('A finch, lovely.'), ...spare()],
+      );
+      await writeOf(await a.session('s1', { userId: 'alice' }).send(aliceSaid));
+      await writeOf(await a.session('s2', { userId: 'bob' }).send(bobSaid));
+      const aliceRows = rowsUnder(keyOf('alice'));
+      const bobRows = rowsUnder(keyOf('bob'));
+      expect(aliceRows).toHaveLength(2);
+      expect(bobRows).toHaveLength(2);
+      expect([...aliceRows, ...bobRows].map((row) => metaOf(row).filedBy)).toEqual(['mind', 'mind', 'mind', 'mind']);
+
       await closed(a);
-    }
 
-    expect(rowsUnder(keyOf('alice'))).toEqual([]);
-    expect(archivedAmong(herIds)).toEqual([]);
-    expect(graphNodesAmong(herIds)).toEqual([]);
-    expect(lines('memory.retention_swept')).toEqual([expect.objectContaining({ traces: 3 })]);
-  });
-});
+      const calls = compiler.seen.flatMap((call) => call.messages.map((message) => message.content));
+      const prompt = calls.find((content): content is string => typeof content === 'string' && content.includes(aliceSaid));
+      expect(prompt).toBeDefined();
+      expect(prompt).not.toContain(bobSaid);
+      const records = JSON.parse(prompt!.slice(prompt!.lastIndexOf('\n\n') + 2));
+      expect(records).toHaveLength(2);
+      expect(records).toEqual(expect.arrayContaining([
+        expect.objectContaining({ speaker: 'user', text: aliceSaid }),
+        expect.objectContaining({ speaker: 'assistant', text: ariaAnswered }),
+      ]));
 
-describe('close() on a souled agent on the GMI runtime', () => {
-  it("compiles the mind's turns with their speakers into each person's own page", async () => {
-    const aliceSaid = 'My canary is named LARK-7.';
-    const ariaAnswered = 'A canary, lovely.';
-    const bobSaid = 'My finch is named WREN-2.';
-    const compileKey = `k-souled-retention-gmi-compile-${++n}`;
-    const compiler = script('openai', compileKey, {
-      whole: true,
-      replies: [reply.text('A note about the conversation.'), reply.text('A note about the conversation.')],
+      const pages = rows<{ content: string }>('SELECT content FROM memory_pages WHERE scope_id = ?', [keyOf('alice')]);
+      expect(pages).toHaveLength(1);
+      expect(pages[0].content).toContain('A note about the conversation.');
+      for (const row of aliceRows) expect(pages[0].content).toContain(row.id);
+      for (const row of bobRows) expect(pages[0].content).not.toContain(row.id);
     });
-    const a = await open(
-      { tombstoneKey: 'k-souled-retention-gmi-tombstones', compile: { provider: 'openai', model: 'stub-model', apiKey: compileKey } },
-      [reply.text(ariaAnswered), reply.text('A finch, lovely.'), ...spare()],
-    );
-    await writeOf(await a.session('s1', { userId: 'alice' }).send(aliceSaid));
-    await writeOf(await a.session('s2', { userId: 'bob' }).send(bobSaid));
-    const aliceRows = rowsUnder(keyOf('alice'));
-    const bobRows = rowsUnder(keyOf('bob'));
-    expect(aliceRows).toHaveLength(2);
-    expect(bobRows).toHaveLength(2);
-    expect([...aliceRows, ...bobRows].map((row) => metaOf(row).filedBy)).toEqual(['mind', 'mind', 'mind', 'mind']);
 
-    await closed(a);
+    it("rebuilds a corrected page from the mind's turns that are left, with their speakers", async () => {
+      const aliceSaid = 'My canary is named LARK-7.';
+      const compileKey = `k-souled-retention-gmi-rebuild-${++n}`;
+      const compiler = script('openai', compileKey, {
+        whole: true,
+        replies: [reply.text('A note about the canary.'), reply.text('A rebuilt note about the canary.'), reply.text('A spare note.')],
+      });
+      const a = await open(
+        { tombstoneKey: 'k-souled-retention-gmi-tombstones', compile: { provider: 'openai', model: 'stub-model', apiKey: compileKey } },
+        [reply.text('A canary, lovely.'), ...spare()],
+      );
+      await writeOf(await a.session('s1', { userId: 'alice' }).send(aliceSaid));
+      const hers = rowsUnder(keyOf('alice'));
+      expect(hers.map((row) => metaOf(row).speaker).sort()).toEqual(['assistant', 'user']);
+      const answered = hers.find((row) => metaOf(row).speaker === 'assistant')!;
+      await a.memory!.compileWiki();
+      expect(rows('SELECT page_id FROM memory_pages WHERE scope_id = ?', [keyOf('alice')])).toHaveLength(1);
+      const before = compiler.seen.length;
 
-    const calls = compiler.seen.flatMap((call) => call.messages.map((message) => message.content));
-    const prompt = calls.find((content): content is string => typeof content === 'string' && content.includes(aliceSaid));
-    expect(prompt).toBeDefined();
-    expect(prompt).not.toContain(bobSaid);
-    const records = JSON.parse(prompt!.slice(prompt!.lastIndexOf('\n\n') + 2));
-    expect(records).toHaveLength(2);
-    expect(records).toEqual(expect.arrayContaining([
-      expect.objectContaining({ speaker: 'user', text: aliceSaid }),
-      expect.objectContaining({ speaker: 'assistant', text: ariaAnswered }),
-    ]));
+      // Deleting the reply deletes the page compiled from it; the next compile builds the page again from what is left.
+      await a.correctUserMemory!('alice', { traceIds: [answered.id] });
+      expect(rows('SELECT page_id FROM memory_pages WHERE scope_id = ?', [keyOf('alice')])).toHaveLength(0);
+      await a.memory!.compileWiki();
 
-    const pages = rows<{ content: string }>('SELECT content FROM memory_pages WHERE scope_id = ?', [keyOf('alice')]);
-    expect(pages).toHaveLength(1);
-    expect(pages[0].content).toContain('A note about the conversation.');
-    for (const row of aliceRows) expect(pages[0].content).toContain(row.id);
-    for (const row of bobRows) expect(pages[0].content).not.toContain(row.id);
-  });
-
-  it("rebuilds a corrected page from the mind's turns that are left, with their speakers", async () => {
-    const aliceSaid = 'My canary is named LARK-7.';
-    const compileKey = `k-souled-retention-gmi-rebuild-${++n}`;
-    const compiler = script('openai', compileKey, {
-      whole: true,
-      replies: [reply.text('A note about the canary.'), reply.text('A rebuilt note about the canary.'), reply.text('A spare note.')],
+      const prompts = compiler.seen
+        .slice(before)
+        .flatMap((call) => call.messages.map((message) => message.content))
+        .filter((content): content is string => typeof content === 'string' && content.includes(aliceSaid));
+      expect(prompts).toHaveLength(1);
+      const records = JSON.parse(prompts[0].slice(prompts[0].lastIndexOf('\n\n') + 2));
+      expect(records).toEqual([expect.objectContaining({ speaker: 'user', text: aliceSaid })]);
+      expect(rows('SELECT page_id FROM memory_pages WHERE scope_id = ?', [keyOf('alice')])).toHaveLength(1);
     });
-    const a = await open(
-      { tombstoneKey: 'k-souled-retention-gmi-tombstones', compile: { provider: 'openai', model: 'stub-model', apiKey: compileKey } },
-      [reply.text('A canary, lovely.'), ...spare()],
-    );
-    await writeOf(await a.session('s1', { userId: 'alice' }).send(aliceSaid));
-    const hers = rowsUnder(keyOf('alice'));
-    expect(hers.map((row) => metaOf(row).speaker).sort()).toEqual(['assistant', 'user']);
-    const answered = hers.find((row) => metaOf(row).speaker === 'assistant')!;
-    await a.memory!.compileWiki();
-    expect(rows('SELECT page_id FROM memory_pages WHERE scope_id = ?', [keyOf('alice')])).toHaveLength(1);
-    const before = compiler.seen.length;
 
-    // Deleting the reply deletes the page compiled from it; the next compile builds the page again from what is left.
-    await a.correctUserMemory!('alice', { traceIds: [answered.id] });
-    expect(rows('SELECT page_id FROM memory_pages WHERE scope_id = ?', [keyOf('alice')])).toHaveLength(0);
-    await a.memory!.compileWiki();
+    it('says through the logger what it left, never on the console: writes still pending, a failed sweep, a failed compile', async () => {
+      const a = await open({ pendingWritesTimeoutMs: 50 }, [reply.text('A canary, lovely.'), ...spare()]);
+      await writeOf(await a.session('s1', { userId: 'alice' }).send('My canary is named LARK-7.'));
+      const [mine] = rowsUnder(keyOf('alice'));
+      // A deletion of one memory that waits at its ownership check: still pending when close() has waited its deadline.
+      const { gate, release } = gated();
+      const owned = a.memory!.liveTraceIdsOf.bind(a.memory!);
+      vi.spyOn(a.memory!, 'liveTraceIdsOf').mockImplementation(async (...args) => {
+        await gate;
+        return owned(...args);
+      });
+      const held = a.correctUserMemory!('alice', { traceIds: [mine.id] }).catch(() => undefined);
+      // The sweep on close and the compile on close both fail, with text the logger never writes.
+      vi.spyOn(a.memory!, 'listScopes').mockRejectedValue(new Error('the sweep found the disk full'));
+      vi.spyOn(a.memory!, 'compileWiki').mockRejectedValue(new Error('the compile found the disk full'));
+      try {
+        await closed(a);
+      } finally {
+        release();
+        await held;
+      }
 
-    const prompts = compiler.seen
-      .slice(before)
-      .flatMap((call) => call.messages.map((message) => message.content))
-      .filter((content): content is string => typeof content === 'string' && content.includes(aliceSaid));
-    expect(prompts).toHaveLength(1);
-    const records = JSON.parse(prompts[0].slice(prompts[0].lastIndexOf('\n\n') + 2));
-    expect(records).toEqual([expect.objectContaining({ speaker: 'user', text: aliceSaid })]);
-    expect(rows('SELECT page_id FROM memory_pages WHERE scope_id = ?', [keyOf('alice')])).toHaveLength(1);
-  });
-
-  it('says through the logger what it left, never on the console: writes still pending, a failed sweep, a failed compile', async () => {
-    const a = await open({ pendingWritesTimeoutMs: 50 }, [reply.text('A canary, lovely.'), ...spare()]);
-    await writeOf(await a.session('s1', { userId: 'alice' }).send('My canary is named LARK-7.'));
-    const [mine] = rowsUnder(keyOf('alice'));
-    // A deletion of one memory that waits at its ownership check: still pending when close() has waited its deadline.
-    const { gate, release } = gated();
-    const owned = a.memory!.liveTraceIdsOf.bind(a.memory!);
-    vi.spyOn(a.memory!, 'liveTraceIdsOf').mockImplementation(async (...args) => {
-      await gate;
-      return owned(...args);
+      // One line, counting what close() still waited for: the call, held on the person's chain, counts there too.
+      const [pending] = lines('memory.close_pending');
+      expect(lines('memory.close_pending')).toHaveLength(1);
+      expect(pending.pending).toBeGreaterThanOrEqual(1);
+      expect(lines('memory.close_sweep_failed')).toEqual([expect.objectContaining({ type: expect.any(String), code: expect.any(String) })]);
+      expect(lines('memory.close_compile_failed')).toEqual([expect.objectContaining({ type: expect.any(String), code: expect.any(String) })]);
+      expect(JSON.stringify(events)).not.toContain('disk full');
+      const said = vi.mocked(console.warn).mock.calls.map((call) => call.map((part) => (typeof part === 'string' ? part : '')).join(' '));
+      expect(said.filter((line) => line.includes('souledAgent'))).toEqual([]);
     });
-    const held = a.correctUserMemory!('alice', { traceIds: [mine.id] }).catch(() => undefined);
-    // The sweep on close and the compile on close both fail, with text the logger never writes.
-    vi.spyOn(a.memory!, 'listScopes').mockRejectedValue(new Error('the sweep found the disk full'));
-    vi.spyOn(a.memory!, 'compileWiki').mockRejectedValue(new Error('the compile found the disk full'));
-    try {
-      await closed(a);
-    } finally {
-      release();
-      await held;
-    }
-
-    // One line, counting what close() still waited for: the call, held on the person's chain, counts there too.
-    const [pending] = lines('memory.close_pending');
-    expect(lines('memory.close_pending')).toHaveLength(1);
-    expect(pending.pending).toBeGreaterThanOrEqual(1);
-    expect(lines('memory.close_sweep_failed')).toEqual([expect.objectContaining({ type: expect.any(String), code: expect.any(String) })]);
-    expect(lines('memory.close_compile_failed')).toEqual([expect.objectContaining({ type: expect.any(String), code: expect.any(String) })]);
-    expect(JSON.stringify(events)).not.toContain('disk full');
-    const said = vi.mocked(console.warn).mock.calls.map((call) => call.map((part) => (typeof part === 'string' ? part : '')).join(' '));
-    expect(said.filter((line) => line.includes('souledAgent'))).toEqual([]);
   });
 });
