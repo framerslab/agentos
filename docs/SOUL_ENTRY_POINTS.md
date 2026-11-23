@@ -103,23 +103,23 @@ See [the high-level API](./getting-started/HIGH_LEVEL_API.md) for signatures and
 
 Keep sentiment off in an EU workplace or education institution unless your counsel clears the use. `cognition: 'full'` enables sentiment.
 
-If you provide an agent that interacts directly with people, design it to disclose that it is an AI unless that is obvious in context to a reasonably well-informed, observant person. [Article 50(1)](https://eur-lex.europa.eu/legal-content/EN/TXT/HTML/?uri=CELEX:02024R1689-20260727)
+If you provide an agent that interacts directly with people, design it to disclose that it is an AI unless that is obvious, in the circumstances and context of use, to a reasonably well-informed, observant and circumspect person. [Article 50(1)](https://eur-lex.europa.eu/legal-content/EN/TXT/HTML/?uri=CELEX:02024R1689-20260727)
 
-The EU AI Act's open-source exception leaves Articles 5 and 50 in force for systems within their scope. [Article 2(12)](https://eur-lex.europa.eu/legal-content/EN/TXT/HTML/?uri=CELEX:02024R1689-20260727)
+The EU AI Act's exclusion for AI systems released under free and open-source licences does not cover a system placed on the market or put into service as a high-risk AI system, or as one that falls under Article 5 or 50. [Article 2(12)](https://eur-lex.europa.eu/legal-content/EN/TXT/HTML/?uri=CELEX:02024R1689-20260727)
 
 ### Children
 
 Return `minor: true` in the account’s memory policy. Choose a retention period in days if you keep its traces. Use the same export and deletion calls to handle a verified parent's request.
 
-If the US children's privacy rule applies to your service, give a verified parent access to their child's personal information and a way to request its deletion. [16 CFR § 312.6](https://www.ecfr.gov/current/title-16/chapter-I/subchapter-C/part-312)
+If the US children's privacy rule applies to your service, give a parent you have confirmed is the child's parent a description of the kinds of information you collect from children, a way to review their child's personal information, and the choice at any time to stop further use or collection of it and to have it deleted. [16 CFR § 312.6](https://www.ecfr.gov/current/title-16/chapter-I/subchapter-C/part-312)
 
-Under that rule, maintain a written retention policy that states why you collect children's information, why you need to keep it and when you will delete it. [16 CFR § 312.10](https://www.ecfr.gov/current/title-16/chapter-I/subchapter-C/part-312)
+Under that rule, maintain a written retention policy that states why you collect children's information, why you need to keep it and when you will delete it, and include the policy in your online notice. [16 CFR § 312.10](https://www.ecfr.gov/current/title-16/chapter-I/subchapter-C/part-312)
 
 ### California companion chatbots and game characters
 
 Implement a crisis protocol of your own. Sentiment events describe the tone of text. Use a separate mechanism for crisis detection.
 
-If you operate a companion chatbot covered by California Business and Professions Code section 22602(b), maintain a protocol for preventing suicide or self-harm content, refer users expressing suicidal ideation, suicide or self-harm to crisis services and publish the protocol details on your website. [BPC § 22602(b)](https://leginfo.legislature.ca.gov/faces/codes_displayText.xhtml?lawCode=BPC&division=8.&title=&part=&chapter=22.6.&article=)
+If you are an operator of a companion chatbot as California Business and Professions Code section 22601 defines it, section 22602(b) bars the chatbot from engaging users unless you maintain a protocol for preventing the production of suicidal ideation, suicide or self-harm content, including a notification that refers a user who expresses suicidal ideation, suicide or self-harm to crisis service providers such as a suicide hotline or crisis text line, and requires you to publish details of the protocol on your website. [BPC § 22602(b)](https://leginfo.legislature.ca.gov/faces/codes_displayText.xhtml?lawCode=BPC&division=8.&title=&part=&chapter=22.6.&article=)
 
 The video game exclusion reads as follows.
 

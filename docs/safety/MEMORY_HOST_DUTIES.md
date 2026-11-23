@@ -138,13 +138,13 @@ The library gives you the calls. The duties below are the controller's.
 
 ### Say why you keep memory, and write it in your privacy notice
 
-Where the GDPR applies, identify your lawful basis and tell users why you process their data, who receives it and how long you keep it. [Articles 6 and 13](https://eur-lex.europa.eu/legal-content/EN/TXT/HTML/?uri=CELEX:02016R0679-20160504)
+Where the GDPR applies, identify your lawful basis and tell users why you process their data, who receives it and how long you keep it or, if you cannot give a period, the criteria you use to set it. [Articles 6 and 13](https://eur-lex.europa.eu/legal-content/EN/TXT/HTML/?uri=CELEX:02016R0679-20160504)
 
 Use `agent.recipients()` when describing your routes. Explain how your product uses compiled pages, records deletions and handles restores.
 
 ### Hold a contract with each provider memory reaches
 
-When a provider processes personal data on your behalf under the GDPR, govern the processing by a binding contract or other applicable legal act and assess any transfer outside the EEA. [Articles 28 and 44](https://eur-lex.europa.eu/legal-content/EN/TXT/HTML/?uri=CELEX:02016R0679-20160504)
+When a provider processes personal data on your behalf under the GDPR, govern the processing by a binding contract or other applicable legal act and assess any transfer to a third country or an international organisation. [Articles 28 and 44](https://eur-lex.europa.eu/legal-content/EN/TXT/HTML/?uri=CELEX:02016R0679-20160504)
 
 Use `compile` to select a separate recipient or local model, or `compile: false` to disable compilation.
 
@@ -191,7 +191,7 @@ The library keeps no backups. Yours hold every deleted person's words until they
 - If you restore a separate learning store and the person's rows are absent from both memory stores, call `agent.forgetUser(userId)` again for each person deleted since the backup was taken.
 - Put `await agent.applyTombstones()` in your restore runbook. An open through `souledAgent()` runs it for you; a restore that bypasses the library's open does not get that for free.
 - Keep the tombstone key in your secret store, with the previous keys after a rotation. A keyed store does not open without them.
-- If Washington's consumer health data law covers your service, a delay to restore archived or backup systems cannot exceed six months from authentication of the deletion request. [RCW 19.373.040(1)(c)(iii)](https://app.leg.wa.gov/RCW/default.aspx?cite=19.373.040)
+- If Washington's consumer health data law covers your service, you may delay deletion of consumer health data stored on archived or backup systems to enable their restoration, for no more than six months after authenticating the deletion request. [RCW 19.373.040(1)(c)(iii)](https://app.leg.wa.gov/RCW/default.aspx?cite=19.373.040)
 
 ### Pass an opaque user id on every session
 
@@ -215,11 +215,11 @@ On PostgreSQL each tombstone write and each `applyTombstones()` takes a lock on 
 
 ### Children
 
-If the US children's privacy rule applies to your service, give a verified parent access to their child's personal information and a way to request its deletion. [16 CFR § 312.6](https://www.ecfr.gov/current/title-16/chapter-I/subchapter-C/part-312)
+If the US children's privacy rule applies to your service, give a parent you have confirmed is the child's parent a description of the kinds of information you collect from children, a way to review their child's personal information, and the choice at any time to stop further use or collection of it and to have it deleted. [16 CFR § 312.6](https://www.ecfr.gov/current/title-16/chapter-I/subchapter-C/part-312)
 
 Use `exportUserMemory` and `forgetUser` for a verified parent’s request. Include data held outside the agent.
 
-Under that rule, maintain a written retention policy that states why you collect children's information, why you need to keep it and when you will delete it. [16 CFR § 312.10](https://www.ecfr.gov/current/title-16/chapter-I/subchapter-C/part-312)
+Under that rule, maintain a written retention policy that states why you collect children's information, why you need to keep it and when you will delete it, and include the policy in your online notice. [16 CFR § 312.10](https://www.ecfr.gov/current/title-16/chapter-I/subchapter-C/part-312)
 
 The library does not know a person's age. If children may use your product, settle age assurance and any consent a parent must give before memory is on for them. Answer `minor: true` from `memoryPolicy` for such accounts, beside `longTerm` and an optional shorter retention. "Until deletion" is not a setting for a child's account, and the library holds to that: on a store that keeps the account's memory until deletion, or with no `retention`, a child's account keeps no long-term memory whatever the answer says, and its turns recall your operator pages alone. On a store with a period in days, its turns are kept for that period, and its pages are compiled only on the provider and model you name in `compile.minors`, and not at all without it; with no key for that provider the compile does not run, and no other provider takes its place. Name a provider whose terms cover a child's data, and say it in your notice. On `runtime: 'gmi'` a child's turns are not scored for sentiment; with cognitive memory on there, they are stored with a neutral emotional state whatever `emotionalStamp` says, and what they recall keeps its emotional context with reconsolidation on.
 
@@ -259,13 +259,13 @@ Keep sentiment off in EU workplaces and education institutions unless your couns
 
 Under EU AI Act Article 5(1)(f), the prohibition on inferring a person's emotions in workplaces and education institutions has exceptions for medical or safety reasons. [Article 5(1)(f)](https://eur-lex.europa.eu/legal-content/EN/TXT/HTML/?uri=CELEX:02024R1689-20260727)
 
-If you provide an agent that interacts directly with people, design it to disclose that it is an AI unless that is obvious in context to a reasonably well-informed, observant person. [Article 50(1)](https://eur-lex.europa.eu/legal-content/EN/TXT/HTML/?uri=CELEX:02024R1689-20260727)
+If you provide an agent that interacts directly with people, design it to disclose that it is an AI unless that is obvious, in the circumstances and context of use, to a reasonably well-informed, observant and circumspect person. [Article 50(1)](https://eur-lex.europa.eu/legal-content/EN/TXT/HTML/?uri=CELEX:02024R1689-20260727)
 
-The EU AI Act's open-source exception leaves Articles 5 and 50 in force for systems within their scope. [Article 2(12)](https://eur-lex.europa.eu/legal-content/EN/TXT/HTML/?uri=CELEX:02024R1689-20260727)
+The EU AI Act's exclusion for AI systems released under free and open-source licences does not cover a system placed on the market or put into service as a high-risk AI system, or as one that falls under Article 5 or 50. [Article 2(12)](https://eur-lex.europa.eu/legal-content/EN/TXT/HTML/?uri=CELEX:02024R1689-20260727)
 
 ### California companion chatbots and game characters
 
-If you operate a companion chatbot covered by California Business and Professions Code section 22602(b), maintain a protocol for preventing suicide or self-harm content, refer users expressing suicidal ideation, suicide or self-harm to crisis services and publish the protocol details on your website. [BPC § 22602(b)](https://leginfo.legislature.ca.gov/faces/codes_displayText.xhtml?lawCode=BPC&division=8.&title=&part=&chapter=22.6.&article=)
+If you are an operator of a companion chatbot as California Business and Professions Code section 22601 defines it, section 22602(b) bars the chatbot from engaging users unless you maintain a protocol for preventing the production of suicidal ideation, suicide or self-harm content, including a notification that refers a user who expresses suicidal ideation, suicide or self-harm to crisis service providers such as a suicide hotline or crisis text line, and requires you to publish details of the protocol on your website. [BPC § 22602(b)](https://leginfo.legislature.ca.gov/faces/codes_displayText.xhtml?lawCode=BPC&division=8.&title=&part=&chapter=22.6.&article=)
 
 Implement your own crisis protocol. The sentiment score measures language tone and has no crisis or self-harm detection function. For a game character, check every condition of the statutory exclusion:
 
