@@ -206,9 +206,9 @@ key are deleted. When an operator page is edited, its old chunks are deleted fro
 store for good and the page is indexed again; the chunks of a page whose file is gone
 are deleted the same way.
 
-`souledAgent()`'s `close()` runs in this order: the agent's own close (with
-`runtime: 'gmi'` it stops the session turns still running; the default runtime's
-lets them run on); one wait, up to 5 seconds (`pendingWritesTimeoutMs` sets it, 0
+`souledAgent()`'s `close()` runs in this order: the agent's own close (on the GMI
+runtime, which is the default, it stops the session turns still running; the legacy
+runtime's lets them run on); one wait, up to 5 seconds (`pendingWritesTimeoutMs` sets it, 0
 waits for none, `Infinity` for all of them), first for the turns still running (a
 `generate()`, a `stream()`, a session's `send()` or `stream()`, on either runtime),
 then for the memory writes of its turns; the compile; then the store's close. A turn
@@ -217,7 +217,7 @@ or writes still pending, the compile takes what is stored and one `memory.close_
 line, through your logger, gives the number still pending; a turn or a write that ends after that is not
 folded into the wiki, and a write that reaches the store once it is closed is not
 stored. A stream whose `abortSignal` aborts before anything was read from it is not
-waited for; on the default runtime a stream runs only once it is read, so one nobody
+waited for; on the legacy runtime a stream runs only once it is read, so one nobody
 reads and nobody aborts keeps the wait until the deadline: read or abort each stream
 before `close()`.
 The compile's model calls go on the agent's route with its fallback settings (`fallbackProviders`,
@@ -359,7 +359,7 @@ const reply = await aria.session('customer-42').send('I need help with my invoic
 console.log(reply.text);
 ```
 
-Every path applies the front matter through one mapping. `agent()` and `souledAgent()` render the hard limits, the `hexaco` trait paragraph and the name; `gmi()` builds its persona from the id, name, role, traits, mood, reasoning-trace limits and hard limits; and the full runtime takes the whole `personaDefinition` that `loadSoul()` returns:
+Every path applies the front matter through one mapping. `agent()`, and `souledAgent()` on `runtime: 'legacy'`, render the hard limits, the `hexaco` trait paragraph and the name; `gmi()`, and `souledAgent()` on its default runtime, build the persona from the id, name, role, traits, mood, reasoning-trace limits and hard limits; and the full runtime takes the whole `personaDefinition` that `loadSoul()` returns:
 
 ```ts
 import { loadSoul } from '@framers/agentos/cognition/substrate/personas/SoulLoader';
@@ -389,25 +389,25 @@ The loader reads the soul's files (SOUL.md, STYLE.md, IDENTITY.md, AGENTS.md, ME
 
 ## What Applies on Each Path
 
-What a soul gives an agent depends on how it is loaded. [Which Call to Use](./SOUL_ENTRY_POINTS.md) says which path to pick, and for each one what it stores about a user and which call exports, corrects and deletes it.
+What a soul gives an agent depends on how it is loaded. `souledAgent()` runs on the GMI runtime with the `light` profile, so with cognitive memory off, unless `runtime` or `memory` says otherwise. [Which Call to Use](./SOUL_ENTRY_POINTS.md) says which path to pick, and for each one what it stores about a user and which call exports, corrects and deletes it.
 
 | Path | Soul prose and style in the prompt | Index of the operator's pages in the prompt | Front matter applied (traits, mood, hard limits, `agentId`) | Recall each turn (a data block in a user-role message) | `read_memory_page` tool | Wiki compiled |
 |---|---|---|---|---|---|---|
 | `agent({ soul })` | Yes | Yes | Hard limits as the last block of the system prompt; the `hexaco` paragraph unless `personality` is set; the soul's `name` unless `name` is set. Mood, voice, avatar and reasoning-trace limits have no renderer here | No (only from a `memoryProvider` you pass) | No | No |
-| `souledAgent()` | Yes | Yes | As `agent({ soul })`; the soul's id (`agentId`, else the slug of its `name`, which for a name with no Latin letters or digits is `agent-` and a hash of the name, else the agent's `name`) scopes the wiki's traces, and a soul with none of the three is rejected | Yes, per subject: the memory of the turn's subject (the session's `userId`, else the session) and the operator's pages, from the wiki's store | Yes: the asker's own pages and the operator's | Yes, per subject, into the store: on `close()` for the subjects its turns wrote to, and by `agent.memory.compileWiki()` |
+| `souledAgent({ runtime: 'legacy' })` | Yes | Yes | As `agent({ soul })`; the soul's id (`agentId`, else the slug of its `name`, which for a name with no Latin letters or digits is `agent-` and a hash of the name, else the agent's `name`) scopes the wiki's traces, and a soul with none of the three is rejected | Yes, per subject: the memory of the turn's subject (the session's `userId`, else the session) and the operator's pages, from the wiki's store | Yes: the asker's own pages and the operator's | Yes, per subject, into the store: on `close()` for the subjects its turns wrote to, and by `agent.memory.compileWiki()` |
 | `agent({ runtime: 'gmi', soul })`, `gmi({ soul })` | Yes | Yes | The persona's id, name, role, traits, mood, reasoning-trace limits and hard limits, the limits as the last block; `voice` and `avatar` are left out with one log line | With cognitive memory on, from cognitive memory; off, only from a `memoryProvider` you pass | No | No |
-| `souledAgent({ runtime: 'gmi' })`, cognitive memory off | Yes | Yes | As `gmi({ soul })`; one id for the persona and the wiki | Yes, per subject, from the wiki's store | Yes: the asker's own pages and the operator's | Yes, per subject, into the store |
-| `souledAgent({ runtime: 'gmi' })`, cognitive memory on | Yes | Yes | As the row above | Yes, per subject, from both paths over one store: the wiki store's recall (the subject's memory the GMI did not file, and the operator's pages) as the data block, and cognitive memory's own block of what the GMI filed. Each session turn is filed once, by the GMI, into the wiki's store under its subject's key | Yes: the asker's own pages and the operator's, and the listing (`{ "list": true }`) is how a user reaches their own | Yes, per subject, into the store |
+| `souledAgent()`, cognitive memory off (the default) | Yes | Yes | As `gmi({ soul })`; one id for the persona and the wiki, by the rule of the `souledAgent({ runtime: 'legacy' })` row | Yes, per subject, from the wiki's store | Yes: the asker's own pages and the operator's | Yes, per subject, into the store |
+| `souledAgent()`, cognitive memory on | Yes | Yes | As the row above | Yes, per subject, from both paths over one store: the wiki store's recall (the subject's memory the GMI did not file, and the operator's pages) as the data block, and cognitive memory's own block of what the GMI filed. Each session turn is filed once, by the GMI, into the wiki's store under its subject's key | Yes: the asker's own pages and the operator's, and the listing (`{ "list": true }`) is how a user reaches their own | Yes, per subject, into the store |
 | The full runtime given `loadSoul().personaDefinition` | Yes (the persona's `baseSystemPrompt`) | No | Yes, every field | From the runtime's own memory, when configured; not from the wiki | No | No |
 
 The exceptions:
 
 - `systemBlocks` replace the prompt the agent assembles, so an agent given a soul and `systemBlocks` has none of the soul's prose, style or memory index in its prompt; the build says so in one `console.warn` line. The hard limits still close the prompt, as one more block after yours with no cache breakpoint of its own. A souled agent in that state still records its turns into the wiki.
 - A named tool map (an object, not an array) is passed through as given, without `read_memory_page`.
-- An inline soul (`{ content }`) has no workspace folder: `souledAgent()` builds a plain `agent()` with no wiki memory, no `read_memory_page` tool and no compile, and says so in one `soul.inline_no_wiki` log line.
+- An inline soul (`{ content }`) has no workspace folder: `souledAgent()` builds a plain agent on the same runtime (`gmi()` by default, `agent()` on `runtime: 'legacy'`) with no wiki memory, no `read_memory_page` tool and no compile, and says so in one `soul.inline_no_wiki` log line.
 - One-shot `generate()` and `stream()` on a GMI run the light profile, so they use the memory provider's recall, the wiki store's on a souled agent, even when sessions run with cognitive memory on. On a souled agent a one-shot call names no user: nothing is filed for it and it recalls the operator's pages alone, unless `sharedMemory` runs it as one user.
 - A seat session on a souled agent runs without cognitive memory. A seat of a launched team uses neither memory hook (no recall from the provider, nothing stored with it) and is refused the memory tools, `read_memory_page` among them.
-- `souledAgent()`'s `memoryPolicy`, `screen` and `sharedMemory` act on the wiki's store, which a souled agent with cognitive memory on files into and recalls from on both paths, so they hold on both. They stay refused, with a `TypeError` and nothing opened, where `souledAgent()` builds a plain `agent()` with `runtime: 'gmi'` and cognitive memory on: an inline soul, and an optional soul that did not load. That agent's GMI files and recalls in a store of its own that none of them reaches.
+- `souledAgent()`'s `memoryPolicy`, `screen` and `sharedMemory` act on the wiki's store, which a souled agent with cognitive memory on files into and recalls from on both paths, so they hold on both. They stay refused, with a `TypeError` and nothing opened, where `souledAgent()` builds a plain agent on the GMI runtime with cognitive memory on: an inline soul, and an optional soul that did not load. That agent's GMI files and recalls in a store of its own that none of them reaches.
 - A souled agent's memory is kept apart per subject on every path this page tables: recall, the page tool, the compile and the store's own reads take one subject's key and match it by equality. The agent's export (`exportAgentConfig`) carries its configuration and no trace and no page.
 - A `memoryProvider`'s recall is sent as a `<memory_recall>` block of JSON in a user-role message before the turn's own, each text datamarked, with one static line of the system prompt that says it is data. It is never a system message, so the hard limits stay the last system text. The framing lowers the chance that a stored sentence is followed as an instruction; it does not remove it. Cognitive memory's own block is rendered by the GMI and is not this block.
 - `agent.session(id, { userId })` scopes what the hooks and the tools are told on both runtimes: the user id, else the session id (an anonymous id such as `system`, `anonymous` or `guest`, or one `learning.anonymousUserIds` lists, counts as none). One session is one user; for a conversation several people share, pass one id for the group. On a souled agent that subject is the key the turn's memory is filed and recalled under, so two users, or two sessions that name none, never read each other's.
