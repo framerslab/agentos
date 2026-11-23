@@ -739,6 +739,32 @@ describe('a self-reflection that settles after the GMI forgot its person', () =>
     expect(h.parseJsonSafe).not.toHaveBeenCalled();
   });
 
+  it('keeps no rationale of a cycle discarded while its imprint was being written, and deletes the imprint', async () => {
+    const h = await createHarness(createPersona([TRAIT_ADJUSTMENT]));
+    const write = h.workingMemory.set.bind(h.workingMemory);
+    let releaseWrite!: () => void;
+    const writeHeld = new Promise<void>((resolve) => {
+      releaseWrite = resolve;
+    });
+    const setSpy = vi.spyOn(h.workingMemory, 'set').mockImplementation(async (key: string, value: unknown) => {
+      if (key === 'canary_name') await writeHeld;
+      return write(key, value);
+    });
+    const reflection = h.gmi._triggerAndProcessSelfReflection();
+    await vi.waitFor(() => expect(h.pending).toHaveLength(1));
+    h.pending[0].resolve(
+      JSON.stringify({ adjustmentRationale: 'Her canary is LARK-7.', newMemoryImprints: [{ key: 'canary_name', value: 'LARK-7' }] }),
+    );
+    await vi.waitFor(() => expect(setSpy).toHaveBeenCalledWith('canary_name', 'LARK-7'));
+    // She is forgotten while the imprint's write is pending: the forgetting waits for that write, then deletes it.
+    const forgotten = h.gmi.forgetPerson();
+    releaseWrite();
+    await Promise.all([forgotten, reflection]);
+
+    expect(JSON.stringify(h.gmi.getReasoningTrace())).not.toContain('LARK-7');
+    expect(await h.workingMemory.get('canary_name')).toBeUndefined();
+  });
+
   it('keeps nothing of a failure whose error quotes the conversation', async () => {
     const h = await createHarness(createPersona([TRAIT_ADJUSTMENT]));
     const logged = vi.spyOn(console, 'error').mockImplementation(() => undefined);
