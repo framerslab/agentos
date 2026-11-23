@@ -29,7 +29,6 @@ import { ObjectGenerationError } from '../generateObject.js';
 import { lowerZodToJsonSchema } from '../../orchestration/compiler/SchemaLowering.js';
 import { buildSchemaInstructionText, dropNullsForOptionalFields, parseJsonWithDistinctKeys } from './structuredReply.js';
 import { validateAgentReply, validationRepairPrompt } from './agentResponseValidation.js';
-import { responseFormatCarriesSchema } from './responseFormatForProvider.js';
 import { fireLlmUsageObserver, type LlmUsageAccountResolver, type LlmUsageAccountSource, type LlmUsageEvent } from '../observers.js';
 import type { SessionHistoryBuffer, SessionTurnWriter } from '../sessionHistory.js';
 import type { SessionTranscriptMessage } from '../sessionTranscript.js';
@@ -984,10 +983,9 @@ export async function generateGmiTurn(
   if (!Number.isInteger(maxRetries) || maxRetries < 0) {
     throw new RangeError('maxValidationRetries must be a non-negative integer');
   }
-  const format = turn.options?.responseFormat as Record<string, unknown> | undefined;
-  const schemaInstruction = responseFormatCarriesSchema(format)
-    ? undefined
-    : buildSchemaInstructionText(lowerZodToJsonSchema(schema), 'response');
+  // Every request of the call states the schema in its system prompt, as agent().generate() does on the legacy
+  // runtime. A payload format the call passes (`responseFormat`) is the caller's own: its schema need not be the agent's.
+  const schemaInstruction = buildSchemaInstructionText(lowerZodToJsonSchema(schema), 'response');
   const validation: GmiGenerateValidation = { history: [] };
   let first: GenerateTextResult | undefined;
   for (let attempt = 0; ; attempt++) {

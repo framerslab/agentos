@@ -976,7 +976,7 @@ On both runtimes, `agent({ responseSchema })` validates `generate()`'s final
 text with the supplied Zod schema and returns the value in `result.parsed`.
 `gmi()` and `souledAgent()` accept the same option. `stream()` delivers text
 without applying the agent's schema.
-It can extract JSON from a code fence. `controls.maxValidationRetries` defaults
+`generate()` can extract JSON from a code fence. `controls.maxValidationRetries` defaults
 to 1, so an invalid reply gets one more attempt. Set it to 0 to throw
 `ObjectGenerationError` on the first invalid reply. A [refusal](#a-refusal-from-the-model)
 is not retried: the send throws `ObjectGenerationError` with the model's
@@ -986,9 +986,13 @@ and names it in its construction warning, so pass an agent's schema as
 `responseSchema`.
 Repair attempts retain the completed transcript, including native tool calls
 and their results, and run without tools so they cannot repeat an action.
+`generate()` returns the accepted attempt's result: its `usage` and `toolCalls`
+are that attempt's own, while `usage()`, the usage ledger and a budget count
+every attempt.
 
-For a session, pass the schema to `send()` and read `result.object`. That schema
-takes precedence over the agent's for the call.
+For a session, pass the schema to `send()` and read `result.object`. The agent's
+`responseSchema` applies to `generate()` alone: a `send()` without a schema of
+its own is not validated, on either runtime.
 
 ```ts
 import { z } from 'zod';
