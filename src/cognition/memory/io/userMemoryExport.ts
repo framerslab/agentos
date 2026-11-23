@@ -402,12 +402,21 @@ export async function exportSubjectMemory(options: {
         }
         if (Array.isArray(tags) && tags.includes('wiki')) continue;
         const role = Array.isArray(tags) ? tags[0] : undefined;
-        const speaker = role === 'user' || role === 'assistant' ? role : undefined;
+        const speaker = role === 'user' || role === 'role:user' ? 'user' : role === 'assistant' || role === 'role:assistant' ? 'assistant' : undefined;
         held.push({ id: row.id, text: row.content, createdAt: isoOf(row.created_at), ...(speaker ? { speaker } : {}) });
       }
       return held;
     }, (rows) => {
       document.held.legacyGmiStore = rows;
+      // The person's own messages there are what they provided too, each once: a row an interrupted move left in both
+      // stores is already listed from the soul's.
+      const listed = new Set(document.provided.messages.map((message) => message.id));
+      const theirs = rows
+        .filter((row) => row.speaker === 'user' && !listed.has(row.id))
+        .map(({ id, createdAt, text }) => ({ id, createdAt, text }));
+      if (theirs.length > 0) {
+        document.provided.messages = [...document.provided.messages, ...theirs].sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+      }
     });
   }
 
