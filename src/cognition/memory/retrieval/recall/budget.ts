@@ -10,7 +10,7 @@ import { recallLog } from './log.js';
 /** The memory block's budget, in tokens, when no `recall.budget.totalTokens` is set: what the GMI's memory bridge asked for before the setting existed. */
 export const DEFAULT_RECALL_BUDGET_TOKENS = 1600;
 
-const CAPTURE_MODES: readonly unknown[] = ['off', 'metadata', 'metadata+stream'];
+const CAPTURE_MODES: readonly unknown[] = ['off', 'metadata', 'metadata+stream', 'metadata+text'];
 const RETRIEVAL_MODES: readonly unknown[] = ['dense', 'hybrid'];
 /** The hybrid recall's constants that count candidates, so must be whole numbers from 1 to {@link MAX_RECALL_COUNT}. */
 const COUNT_CONSTANTS: readonly string[] = ['topK', 'recentTopK', 'overFetch'];
@@ -125,7 +125,7 @@ function assertRerankSetting(rerank: unknown, where: string): void {
 
 /**
  * Checks a recall setting's values: the setting and its `budget` objects, `budget.totalTokens` an integer of at least
- * 0, `capture` one of its three modes, `retrieval` `'dense'` or `'hybrid'`, `rerank` `'none'` or a `local` or `llm`
+ * 0, `capture` one of its four modes, `retrieval` `'dense'` or `'hybrid'`, `rerank` `'none'` or a `local` or `llm`
  * setting with its fields (a non-blank `model`; `local`'s `revision`, a whole commit id in lower case; `llm`'s `invoke`;
  * `timeoutMs` and `maxCandidates` positive integers, `timeoutMs` at most 2,147,483,647), and a manager's `constants` an object of the hybrid recall's constants by name,
  * each a finite number of at least 0, `topK`, `recentTopK` and `overFetch` integers from 1 to 1,000, and
@@ -151,7 +151,7 @@ export function assertRecallConfig(recall: ManagerRecallConfig | null | undefine
     rejectRecallOption('budget.totalTokens', 'invalid_value', `${where}: memory.recall.budget.totalTokens must be an integer of at least 0.`);
   }
   if (recall.capture != null && !CAPTURE_MODES.includes(recall.capture)) {
-    rejectRecallOption('capture', 'invalid_value', `${where}: memory.recall.capture must be 'off', 'metadata' or 'metadata+stream'.`);
+    rejectRecallOption('capture', 'invalid_value', `${where}: memory.recall.capture must be 'off', 'metadata', 'metadata+stream' or 'metadata+text'.`);
   }
   if (recall.retrieval != null && !RETRIEVAL_MODES.includes(recall.retrieval)) {
     rejectRecallOption('retrieval', 'invalid_value', `${where}: memory.recall.retrieval must be 'dense' or 'hybrid'.`);

@@ -514,7 +514,8 @@ export interface MemoryRecallConfig {
    * context (`AssembledMemoryContext.capture`) and on a GMI turn's result;
    * `'metadata+stream'` also sends it on the runtime stream (a
    * `METADATA_UPDATE` carrying `memorySources`, and `memoryRecall` on the
-   * `FINAL_RESPONSE`); `'off'` records nothing. The record holds ids, ranks,
+   * `FINAL_RESPONSE`). `'metadata+text'` adds a separate `memoryShown` list of
+   * the memories shown to the model. `'off'` records nothing. The capture holds ids, ranks,
    * scores, counts and timings, never a memory's text or the query's; ids and
    * scores can concern memories of the other scopes a turn reads (the
    * organization's, the persona's), so the host decides who sees a capture.

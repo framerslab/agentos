@@ -41,7 +41,7 @@ import type { AgencyLaunchFrame, ToolCallHook } from './agencyLaunch/types.js';
 import { GmiTurnFolder, streamFromGmiTurn } from './gmiResults.js';
 import { stepToTranscript, transcriptToConversation } from './gmiTranscript.js';
 import { observeWithoutWaiting } from './memoryObserveFailures.js';
-import { emptyMemoryWriteRecord, memoryWriteRecordOf, type MemoryWriteEntry, type MemoryWriteRecord } from './memoryWriteRecord.js';
+import { emptyMemoryWriteRecord, memoryWriteRecordOf, type MemoryShownItem, type MemoryWriteEntry, type MemoryWriteRecord } from './memoryWriteRecord.js';
 import { contentWithTurnText, judgeTurnInput } from './textGuardrails.js';
 import type { SoulTurnMemory } from '../../cognition/substrate/soulTurnMemory.js';
 
@@ -188,6 +188,8 @@ export interface GmiTurnContext {
    * before the turn's user message on every model call.
    */
   memoryContext: string | undefined;
+  /** Called on every model call of the turn: whether its messages, after the host's hook, hold the provider's recall block. */
+  onProviderMemoryShown?: (shown: boolean) => void;
   /** Called before every model call of the turn with the provider and model its hop was routed to. */
   onModelCall?: (route: { providerId: string; modelId: string }) => void;
   /** True for a structured send: its model calls go without tools. */
@@ -270,6 +272,8 @@ export interface GmiSessionDeps {
    * `memoryProviderOptions.tokenBudget`, else `DEFAULT_MEMORY_TOKEN_BUDGET`.
    */
   providerTokenBudget?: number;
+  /** True for a GMI session with the host's `'metadata+text'` capture level. */
+  captureMemoryText?: boolean;
   /** False on a seat session: the turn calls no `memoryProvider.observe`, which would file a team turn's text in the agent's long-term store. Default true. */
   observeMemoryProvider?: boolean;
   /**
@@ -582,6 +586,10 @@ export async function* runGmiTurn(
       : null;
     const items = memoryItemsOf(recalled);
     const memoryContext = items.length > 0 ? renderMemoryRecallBlock(items) : undefined;
+    // Whether the provider's block reached the model: the step in progress takes its newest call's answer, so a
+    // fallback hop's call replaces the failed hop's, and a finished step that was sent it keeps it for the turn.
+    let providerShownInStep = false;
+    let providerShownInTurn = false;
     // When the model call in progress started: the turn's start, the end of the
     // tool round before it, or the failure of the attempt it replaces.
     let callStartedAt = Date.now();
@@ -590,6 +598,9 @@ export async function* runGmiTurn(
     served.prepare?.({
       prompt: typeof input === 'string' ? input : undefined,
       memoryContext,
+      ...(deps.captureMemoryText && memoryContext
+        ? { onProviderMemoryShown: (shown: boolean) => { providerShownInStep = shown; } }
+        : {}),
       onModelCall: ({ providerId, modelId }) => folder.route(providerId, modelId),
       structured: turn.responseSchema !== undefined,
       budget: turn.budget,
@@ -650,13 +661,29 @@ export async function* runGmiTurn(
 
     let stepCalls: ToolCallRequest[] = [];
     // The GMI's output, the generator's return value, carries the turn's recall capture to the result.
-    for await (const chunk of withReturn(gmi.processTurnStream(turnInput), (output) => folder.finish(output))) {
+    for await (const chunk of withReturn(gmi.processTurnStream(turnInput), (output) => {
+      if (!output || !(providerShownInTurn || providerShownInStep)) {
+        folder.finish(output);
+        return;
+      }
+      const providerItems = items.map<MemoryShownItem>(({ id, text, speaker, page, when }) => ({
+        source: 'provider',
+        text,
+        ...(id ? { id } : {}),
+        ...(speaker ? { speaker } : {}),
+        ...(page ? { page } : {}),
+        ...(when ? { at: when } : {}),
+      }));
+      folder.finish({ ...output, memoryShown: [...(output.memoryShown ?? []), ...providerItems] });
+    })) {
       folder.push(chunk);
       switch (chunk.type) {
         case GMIOutputChunkType.TOOL_CALL_REQUEST:
           stepCalls.push(...((chunk.content as ToolCallRequest[]) ?? []));
           break;
         case GMIOutputChunkType.STEP_FINISHED: {
+          providerShownInTurn ||= providerShownInStep;
+          providerShownInStep = false;
           flush();
           const step = chunk.content as StepFinishedChunkPayload;
           await afterGeneration(deps.opts, folder, step, stepCalls);
@@ -905,10 +932,11 @@ export function streamGmiTurn(deps: GmiSessionDeps, input: MessageContent, turn:
   const callerSignal = turn.callerSignal;
   const guarded = turn.guards !== undefined;
   const observed = carriesWriteRecord(deps);
+  const captureMemoryText = deps.captureMemoryText;
   if (callerSignal?.aborted) {
     const reason = abortReasonError(callerSignal);
     const refused: AsyncIterable<GMIOutputChunk> = { [Symbol.asyncIterator]: () => ({ next: () => Promise.reject(reason) }) };
-    return streamFromGmiTurn(refused, { guarded, observed });
+    return streamFromGmiTurn(refused, { guarded, observed, captureMemoryText });
   }
   // Whether the caller's signal had aborted when the turn's failure was recorded: then the stop ended the turn, and its
   // error part carries the signal's reason. A failure that came first (a provider's error, a budget's refusal) keeps
@@ -939,5 +967,5 @@ export function streamGmiTurn(deps: GmiSessionDeps, input: MessageContent, turn:
   // A turn the caller's signal stopped ends with the signal's reason in its error part, as streamText reports it,
   // whatever error the GMI made of the abort.
   // The stream reads the turn from here on, so the turn's own code runs in this context.
-  return drivingTurnOn(deps.lock, () => streamFromGmiTurn(chunks, { folder, stop: () => stop.abort(), stoppedBy: () => stoppedBy, guarded, observed }));
+  return drivingTurnOn(deps.lock, () => streamFromGmiTurn(chunks, { folder, stop: () => stop.abort(), stoppedBy: () => stoppedBy, guarded, observed, captureMemoryText }));
 }

@@ -1165,7 +1165,8 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
   ): Promise<AssembledMemoryContext> {
     this.ensureInitialized();
     // Under `recall.capture: 'off'` the assembly takes no timings and builds no capture.
-    const capturing = this.recallCaptureMode() !== 'off';
+    const captureMode = this.recallCaptureMode();
+    const capturing = captureMode !== 'off';
     const startedAt = capturing ? performance.now() : 0;
 
     // The three pre-assembly stages that hit a backend — retrieval (vector
@@ -1248,6 +1249,9 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
     const selection = this.recallSelections.get(result);
     const suppliedIds = new Set(selection?.suppliedIds ?? []);
     const reservedIds = hybrid ? (selection?.reservedIds ?? []).filter((id) => result.retrieved.some((trace) => trace.id === id)) : [];
+    const textTraces = captureMode === 'metadata+text'
+      ? new Map<string, MemoryTrace>(result.retrieved.map((trace) => [trace.id, trace]))
+      : undefined;
 
     // --- Batch 2: Graph associations ---
     const graphContext: MemoryGraphAssociation[] = [];
@@ -1279,6 +1283,7 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
               traceId: node.memoryId,
               text: `[associated, activation=${node.activation.toFixed(2)}] ${asShownInMemoryBlock(trace).content}`,
             });
+            textTraces?.set(trace.id, trace);
           }
         }
       } catch {
@@ -1301,6 +1306,12 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
     };
 
     const context = assembleMemoryContext(input);
+    if (textTraces) {
+      context.shownTexts = Array.from(textTraces.values(), (trace) => {
+        const speaker = trace.filing?.speaker ?? trace.tags.find((tag): tag is 'user' | 'assistant' => tag === 'user' || tag === 'assistant');
+        return { id: trace.id, text: asShownInMemoryBlock(trace).content, ...(speaker ? { speaker } : {}), createdAt: trace.createdAt };
+      });
+    }
     // How many reserved lines the block shows, read from its lines, so the count is the same with the capture off.
     const reserveAdded = (lines: readonly AssembledLineOutcome[] | undefined): number => {
       const ids = new Set(reservedIds);
@@ -1366,6 +1377,7 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
     if (!kept) throw new Error('reassembleForBudget: this memory manager did not return that context.');
     const startedAt = performance.now();
     const next = assembleMemoryContext({ ...kept.input, totalTokenBudget: tokenBudget });
+    if (context.shownTexts) next.shownTexts = context.shownTexts;
     if (kept.capture) {
       // The same candidates in the same order, with this rendering's outcomes: one no section had a line for is left
       // out for the budget.

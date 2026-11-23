@@ -1012,7 +1012,7 @@ await manager.initialize({ ...config, recall: { budget: { totalTokens: 2400 } } 
 const assistant = agent({ runtime: 'gmi', provider: 'openai', memory: { embedding: { provider: 'openai' }, recall: { budget: { totalTokens: 2400 } } } });
 ```
 
-`initialize()` checks the recall settings before it builds anything: a `budget.totalTokens` that is not an integer of at least 0, a `capture` other than `'off'`, `'metadata'` and `'metadata+stream'`, a `retrieval` other than `'dense'` and `'hybrid'`, or a `rerank` that is neither `'none'` nor a `local` or `llm` setting with its fields, is refused with a `RecallOptionError` naming the field (`option`, with `reason: 'invalid_value'`, or `'unsupported_provider'` for a `rerank` of another `kind`), after one `memory.recall.option_rejected` line. A host of `AgentOS.create` sets `recall` on the manager its `gmiManagerConfig.cognitiveMemoryFactory` builds; `agent()` and `gmi()` set it from `memory.recall` ([GMIs from agent()](../GMI.md#gmis-from-agent)). The bridge reads it at each turn, so a change to a built manager's configuration applies from its next turn. A direct `assembleForPrompt()` call passes a budget of its own, and `AgentMemory.getContext()` passes its caller's `tokenBudget`, 2,000 by default.
+`initialize()` checks the recall settings before it builds anything: a `budget.totalTokens` that is not an integer of at least 0, a `capture` outside the four levels below, a `retrieval` other than `'dense'` and `'hybrid'`, or a `rerank` that is neither `'none'` nor a `local` or `llm` setting with its fields, is refused with a `RecallOptionError` naming the field (`option`, with `reason: 'invalid_value'`, or `'unsupported_provider'` for a `rerank` of another `kind`), after one `memory.recall.option_rejected` line. A host of `AgentOS.create` sets `recall` on the manager its `gmiManagerConfig.cognitiveMemoryFactory` builds; `agent()` and `gmi()` set it from `memory.recall` ([GMIs from agent()](../GMI.md#gmis-from-agent)). The bridge reads it at each turn, so a change to a built manager's configuration applies from its next turn. A direct `assembleForPrompt()` call passes a budget of its own, and `AgentMemory.getContext()` passes its caller's `tokenBudget`, 2,000 by default.
 
 ### Budget and the prompt share
 
@@ -1107,7 +1107,10 @@ The rest of the record:
 |---|---|---|---|
 | `'metadata'` (default) | Set | Set | Not sent |
 | `'metadata+stream'` | Set | Set | Sent, the update before the reply's text; a turn that stops for the host's tool calls ends, after the host's results, with a `FINAL_RESPONSE` that carries the capture the turn announced. The runtime stream is the one `AgentOS.create()`'s `processRequest()` returns: a session of `agent({ runtime: 'gmi' })` or `gmi()` records under `'metadata+stream'` what it records under `'metadata'`, and its `stream()` parts carry no memory part |
+| `'metadata+text'` | Set | Set, with a separate `memoryShown` result for recalled items shown to the model | Not sent |
 | `'off'` | Unset | Unset | Not sent |
+
+**Recall text.** With `'metadata+text'`, `memoryShown` lists the text, speaker when known, and date of the recalled items shown on the serving hop. On a souled GMI, the list includes cognitive memory items (`source: 'memory'`, with an ISO 8601 date) and the soul provider's items (`source: 'provider'`, with the date as the block phrases it). A page note carries its page and has no trace id. Other items carry the trace id, which a souled agent's host can pass to `correctUserMemory` for the person who owns the trace. A provider's trace ids stay out of the model's data block. `send()` omits `memoryShown` when there are no shown items. An opted-in `stream()` exposes it as a promise that resolves at the end of the stream and yields an empty list when there are no shown items; a stream that ends on an error lists what the hop last tried was sent, as `memoryRecall` reports that hop. A block that a host hook changes or removes on the serving hop lists none of its items, because its stored text is no longer what the model read. The default capture keeps recall text out of the turn result. Opting in puts people's words in the result, so keep `memoryShown` out of application logs.
 
 ```typescript
 await manager.initialize({ ...config, recall: { capture: 'metadata+stream' } });
@@ -1248,7 +1251,7 @@ interface CognitiveMemoryConfig {
 
 interface ManagerRecallConfig {
   budget?: { totalTokens?: number };           // Default: 1600, the whole block (see Recall Budget)
-  capture?: 'metadata' | 'metadata+stream' | 'off'; // Default: 'metadata' (see Recall Capture)
+  capture?: 'metadata' | 'metadata+stream' | 'metadata+text' | 'off'; // Default: 'metadata' (see Recall Capture)
   retrieval?: 'dense' | 'hybrid';              // Default: 'dense' (see Recall)
   rerank?:                                     // Default: 'none' (see Recall, Rerank)
     | 'none'

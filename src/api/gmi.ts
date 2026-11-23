@@ -1031,6 +1031,17 @@ export function gmi(opts: GmiOptions): GmiHandle {
             console.warn('[agentos] onBeforeGeneration hook error:', hookError);
           }
         }
+        // The provider's items count as shown only when this call's messages, after the host's hook, still hold the
+        // block as it was rendered: a hook can drop or rewrite it, a fallback hop's call included. The session keeps
+        // each step's serving call's answer for the turn's `memoryShown`.
+        if (turn.onProviderMemoryShown) {
+          const block = turn.memoryContext;
+          turn.onProviderMemoryShown(block !== undefined && messages.some(({ content }) =>
+            typeof content === 'string'
+              ? content.includes(block)
+              : Array.isArray(content) && content.some((part) => 'text' in part && typeof part.text === 'string' && part.text.includes(block)),
+          ));
+        }
         return changed ? messages : undefined;
       },
     };
@@ -1337,6 +1348,7 @@ export function gmi(opts: GmiOptions): GmiHandle {
           // provider recalls beside the soul's mind, and the mind files the turn, once: the provider does not.
           useMemoryProviderContext: (!cognition.memory || soulBrain !== undefined) && !seat,
           providerTokenBudget: resolvedRecall.providerTokenBudget,
+          captureMemoryText: resolvedRecall.managerRecall?.capture === 'metadata+text',
           observeMemoryProvider: !seat,
           ...(soulBrain && !seat ? { mindFilesTurn: true } : {}),
           // Who the turn's memory hooks are told it serves.
