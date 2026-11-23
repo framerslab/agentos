@@ -234,8 +234,11 @@ describe('a passed store on a souled GMI', () => {
     restore(saved);
     expect(await legacyCanaryId()).toBe(id);
     embeddings.failEmbedding = () => true;
+    events.length = 0;
     const reopened = await open();
     expect(await legacyCanaryId()).toBe(id);
+    // The passed store's failed replay says why, as well as counting it.
+    expect(events).toContainEqual(expect.objectContaining({ event: 'memory.erasure_unfinished', type: expect.any(String) }));
     embeddings.failEmbedding = undefined;
     await reopened.applyTombstones!();
     expect(await legacyRows(ALICE)).toEqual([]);
@@ -277,6 +280,8 @@ describe('a passed store on a souled GMI', () => {
     expect(await brainOf(joined.memory!).get('SELECT id FROM memory_traces WHERE id = ?', [trace.id])).toBeFalsy();
     expect.soft(report.complete).toBe(false);
     expect.soft(report.stores).toContainEqual({ store: STORE_LABEL, reached: false, reason: expect.any(String) });
+    // The learning layer's deletion did not finish, so its own store keeps the person's rows too.
+    expect(report.stores).toContainEqual({ store: 'learning store', reached: false, reason: expect.any(String) });
     expect(await legacyCanaryId()).toBe(id);
 
     embeddings.failEmbedding = undefined;
