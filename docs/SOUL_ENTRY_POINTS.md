@@ -45,7 +45,7 @@ There is no file-to-`soulStore` import call. The file's brain id comes from its 
 | What is derived? | Per-user wiki pages and their chunks, a search index and graph records. The deletion ledger records tombstones, deleted trace ids and live corrections. | Cognitive recall adds vectors, trace strengths, access records and graph links. Stored emotional context defaults to neutral. Each user's traces feed that user's wiki compile. |
 | Who receives text? | The chat model receives the conversation and recalled text. The compile model receives the user's screened traces when compilation runs. `compile: false` disables it. | The named embedding provider also receives recall queries and text accepted for embedding. `agent.recipients()` lists configured and recorded routes. Session requests withhold the end-user id unless you set `sendUserIdToProvider: true` on a GMI path whose provider accepts it. |
 | How do I export or correct it? | `exportUserMemory(userId)` returns traces and pages. `correctUserMemory(userId, { traceIds, text })` replaces the selected memories. Omit `text` to delete them. | The same calls include mind-filed rows. Inspect the export's `unread` entries for stores that could not be read. |
-| How do I restrict or delete it? | Return `{ longTerm: 'off' }` from `memoryPolicy` to stop personal filing, recall and compilation. Stored traces remain. `forgetUser(userId, { linkedSessions })` erases the user's memory and the anonymous sessions you identify. Check `complete`. | The same policy also stops mechanisms working on that person's memory. The same deletion reaches the live mind and clears this handle's sessions for the user. The host handles other processes, recipients and backups. |
+| How do I restrict or delete it? | Return `{ longTerm: 'off' }` from `memoryPolicy` to stop personal filing, recall and compilation. Stored traces remain. `forgetUser(userId, { linkedSessions })` erases the user's memory and the anonymous sessions you identify. Check `complete`. | The same policy also stops mechanisms working on that person's memory. With sentiment on (`cognition: 'full'`), `longTerm: 'off'` still scores the person's messages; `profiling: 'off'` stops that. The same deletion reaches the live mind and clears this handle's sessions for the user. The host handles other processes, recipients and backups. |
 
 A one-shot call without a user reads operator pages and files nothing unless you set `sharedMemory`. A seat session runs without cognitive memory. For the difference between screening text for storage and blocking a turn before its first provider call, see [input guards](./safety/GUARDRAILS_USAGE.md).
 
@@ -95,15 +95,19 @@ if (page?.sources.includes(selectedTraceId)) {
 }
 ```
 
+With `legacyMemory`, the export also holds traces from before per-user scope and the older pages built from them. Show those as read-only: `correctUserMemory` rejects their trace ids.
+
 See [the high-level API](./getting-started/HIGH_LEVEL_API.md) for signatures and [host duties](./safety/MEMORY_HOST_DUTIES.md) for deletion receipts, restores and recipients.
 
 ## Before you serve users
 
 ### EU workplaces and education
 
-Keep sentiment off in an EU workplace or education institution unless your counsel clears the use. `cognition: 'full'` enables sentiment.
+As a precaution, keep sentiment off in an EU workplace or education institution unless your counsel clears the use. `cognition: 'full'` enables sentiment.
 
 If you provide an agent that interacts directly with people, design it to disclose that it is an AI unless that is obvious, in the circumstances and context of use, to a reasonably well-informed, observant and circumspect person. [Article 50(1)](https://eur-lex.europa.eu/legal-content/EN/TXT/HTML/?uri=CELEX:02024R1689-20260727)
+
+Give that information clearly and distinguishably, at the latest at the first interaction. [Article 50(5)](https://eur-lex.europa.eu/legal-content/EN/TXT/HTML/?uri=CELEX:02024R1689-20260727)
 
 The EU AI Act's exclusion for AI systems released under free and open-source licences does not cover a system placed on the market or put into service as a high-risk AI system, or as one that falls under Article 5 or 50. [Article 2(12)](https://eur-lex.europa.eu/legal-content/EN/TXT/HTML/?uri=CELEX:02024R1689-20260727)
 
@@ -111,7 +115,7 @@ The EU AI Act's exclusion for AI systems released under free and open-source lic
 
 Return `minor: true` in the account’s memory policy. Choose a retention period in days if you keep its traces. Use the same export and deletion calls to handle a verified parent's request.
 
-If the US children's privacy rule applies to your service, give a parent you have confirmed is the child's parent a description of the kinds of information you collect from children, a way to review their child's personal information, and the choice at any time to stop further use or collection of it and to have it deleted. [16 CFR § 312.6](https://www.ecfr.gov/current/title-16/chapter-I/subchapter-C/part-312)
+If the US children's privacy rule applies to your service, give a parent who asks, once you have confirmed they are the child's parent, a description of the kinds of information you collect from children, a way to review their child's personal information, and the choice at any time to stop further use or collection of it and to have it deleted. [16 CFR § 312.6](https://www.ecfr.gov/current/title-16/chapter-I/subchapter-C/part-312)
 
 Under that rule, maintain a written retention policy that states why you collect children's information, why you need to keep it and when you will delete it, and include the policy in your online notice. [16 CFR § 312.10](https://www.ecfr.gov/current/title-16/chapter-I/subchapter-C/part-312)
 
@@ -138,4 +142,4 @@ A workspace-backed `souledAgent({ runtime: 'gmi' })` gives each user one durable
 - **Account for team sessions.** A seat session on a souled agent runs without cognitive memory.
 - **Update policy on open sessions.** On either runtime, a later `memoryPolicy` answer for a user on the same agent object replaces an open session's answer from its next turn.
 - **Route warnings through your logger.** Four former `console.warn` calls in `souledAgent()` emit `soul.inline_no_wiki`, `memory.close_pending`, `memory.close_sweep_failed` and `memory.close_compile_failed`. In `gmi()`, a skipped provider context emits `memory.provider_context_skipped`.
-- **Protect the second copy and plan a rollback.** The tombstone copy also holds the text of each live correction. When rolling back to 0.19.x, drop the `memory_corrections` table from that copy. Version 0.19.x reads mind-filed rows as ordinary conversation rows and recalls them through the provider. If you opened the agent with `soulStore`, moving back to the file store requires moving your data.
+- **Protect the second copy and plan a rollback.** The tombstone copy also holds the text of each live correction. When rolling back to 0.19.x, drop the `memory_corrections` table from that copy: 0.19.x neither replays nor deletes its rows, so a person it forgets would keep their corrections' text there. Version 0.19.x reads mind-filed rows as ordinary conversation rows and recalls them through the provider. If you opened the agent with `soulStore`, moving back to the file store requires moving your data.

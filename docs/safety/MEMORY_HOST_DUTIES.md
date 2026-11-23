@@ -215,7 +215,7 @@ On PostgreSQL each tombstone write and each `applyTombstones()` takes a lock on 
 
 ### Children
 
-If the US children's privacy rule applies to your service, give a parent you have confirmed is the child's parent a description of the kinds of information you collect from children, a way to review their child's personal information, and the choice at any time to stop further use or collection of it and to have it deleted. [16 CFR § 312.6](https://www.ecfr.gov/current/title-16/chapter-I/subchapter-C/part-312)
+If the US children's privacy rule applies to your service, give a parent who asks, once you have confirmed they are the child's parent, a description of the kinds of information you collect from children, a way to review their child's personal information, and the choice at any time to stop further use or collection of it and to have it deleted. [16 CFR § 312.6](https://www.ecfr.gov/current/title-16/chapter-I/subchapter-C/part-312)
 
 Use `exportUserMemory` and `forgetUser` for a verified parent’s request. Include data held outside the agent.
 
@@ -245,7 +245,7 @@ By default the library keeps no history of how a person felt. A session's sentim
 
 When you grant a restriction under GDPR Article 18, limit further processing as the article requires. [Article 18](https://eur-lex.europa.eu/legal-content/EN/TXT/HTML/?uri=CELEX:02016R0679-20160504)
 
-Return `{ longTerm: 'off' }` to stop personal recall, filing and compilation while preserving stored traces. Apply the restriction to your own processing too.
+Return `{ longTerm: 'off' }` to stop personal recall, filing and compilation while preserving stored traces. On `runtime: 'gmi'` with sentiment tracking on, `longTerm: 'off'` still scores the person's messages; where the restriction covers that, answer `profiling: 'off'` too. Apply the restriction to your own processing too.
 
 A session keeps the answer it was given until a later answer for the same account, given to any session or call of the same agent object, replaces it from its next turn. Another agent object, in the same process or another, reads your answer at its own sessions' next ask. Where a restriction must hold at once in every one of them (an objection, an age you learn), close that person's open sessions in each, or call `agent.forgetUser(userId)`, which deletes what is stored and keeps it deleted. A compile already running reads your latest answer before each of its model calls.
 
@@ -255,11 +255,13 @@ Review the health information users may disclose and the inferences a wiki page 
 
 ### EU AI Act
 
-Keep sentiment off in EU workplaces and education institutions unless your counsel clears the use. The full cognition preset enables sentiment.
+As a precaution, keep sentiment off in EU workplaces and education institutions unless your counsel clears the use. The full cognition preset enables sentiment.
 
 Under EU AI Act Article 5(1)(f), the prohibition on inferring a person's emotions in workplaces and education institutions has exceptions for medical or safety reasons. [Article 5(1)(f)](https://eur-lex.europa.eu/legal-content/EN/TXT/HTML/?uri=CELEX:02024R1689-20260727)
 
 If you provide an agent that interacts directly with people, design it to disclose that it is an AI unless that is obvious, in the circumstances and context of use, to a reasonably well-informed, observant and circumspect person. [Article 50(1)](https://eur-lex.europa.eu/legal-content/EN/TXT/HTML/?uri=CELEX:02024R1689-20260727)
+
+Give that information clearly and distinguishably, at the latest at the first interaction. [Article 50(5)](https://eur-lex.europa.eu/legal-content/EN/TXT/HTML/?uri=CELEX:02024R1689-20260727) A hard limit in the soul such as "Say you are an AI whenever asked" backs that notice and does not replace it.
 
 The EU AI Act's exclusion for AI systems released under free and open-source licences does not cover a system placed on the market or put into service as a high-risk AI system, or as one that falls under Article 5 or 50. [Article 2(12)](https://eur-lex.europa.eu/legal-content/EN/TXT/HTML/?uri=CELEX:02024R1689-20260727)
 
