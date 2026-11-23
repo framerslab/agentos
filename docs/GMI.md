@@ -206,9 +206,15 @@ A soul file's front matter is applied through the loader's one mapping, so the "
 
   On a workspace-backed `souledAgent({ runtime: 'gmi' })`, a passed `memory.store` still supplies the learning store's
   adapter when `learning.store` is unset. Session turns read and write their traces in the soul's store. The passed
-  Brain is opened with the agent and logs one `memory.legacy_gmi_store` event with the trace count and
+  Brain is opened with the agent (a passed store that does not open fails `souledAgent()` with its error, after the
+  soul's store is closed) and logs one `memory.legacy_gmi_store` event with the count of its live traces and
   `call: 'copyLegacyGmiMemory'`. `forgetUser()` reaches the passed store after the soul's tombstone, mind, store and
-  sessions. `exportUserMemory()` lists the person's traces there in `held.legacyGmiStore`, and
+  sessions. It first records in the tombstone ledger the id of each of the person's traces there (under their user
+  and persona scopes, the scopes of their sessions that store's own learning tables index, and a turn's rows filed
+  for them as a second user), so a restore of the passed store alone is undone at the next open even when
+  `learning.store` keeps the learning tables elsewhere. It deletes those traces with the ones the learning layer
+  names, then empties that store's write-ahead log: a log another connection holds leaves the store not reached and
+  the report `complete: false`. `exportUserMemory()` lists the person's traces there in `held.legacyGmiStore`, and
   `correctUserMemory()` can delete a trace id from that list. The retention sweep skips the passed store. Once rows
   are copied into the soul's store, they are covered by `retention`.
 
