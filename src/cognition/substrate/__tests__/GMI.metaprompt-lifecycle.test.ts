@@ -724,6 +724,41 @@ describe('metaprompt work that runs late', () => {
   });
 });
 
+describe('a self-reflection that settles after the GMI forgot its person', () => {
+  it('keeps nothing of the answer in the trace, and makes no repair call for it', async () => {
+    const h = await createHarness(createPersona([TRAIT_ADJUSTMENT]));
+    const reflection = h.gmi._triggerAndProcessSelfReflection();
+    await vi.waitFor(() => expect(h.pending).toHaveLength(1));
+    await h.gmi.forgetPerson();
+
+    h.pending[0].resolve(JSON.stringify({ adjustmentRationale: 'Her canary is LARK-7.' }));
+    await reflection;
+
+    expect(JSON.stringify(h.gmi.getReasoningTrace())).not.toContain('LARK-7');
+    expect(warningsMentioning(h.gmi, 'Discarded late results')).toHaveLength(1);
+    expect(h.parseJsonSafe).not.toHaveBeenCalled();
+  });
+
+  it('keeps nothing of a failure whose error quotes the conversation', async () => {
+    const h = await createHarness(createPersona([TRAIT_ADJUSTMENT]));
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      const reflection = h.gmi._triggerAndProcessSelfReflection();
+      await vi.waitFor(() => expect(h.pending).toHaveLength(1));
+      await h.gmi.forgetPerson();
+
+      h.pending[0].reject(new Error('The provider refused the text "My canary is LARK-7."'));
+      await reflection;
+
+      expect(JSON.stringify(h.gmi.getReasoningTrace())).not.toContain('LARK-7');
+      expect(warningsMentioning(h.gmi, 'Discarded late results')).toHaveLength(1);
+      expect(logged).not.toHaveBeenCalled();
+    } finally {
+      logged.mockRestore();
+    }
+  });
+});
+
 describe('metaprompt model resolution on OpenRouter', () => {
   it('finds the registered router for a namespaced default model instead of guessing its prefix', async () => {
     // Only OpenRouter is registered; the GMI default model is OpenRouter's

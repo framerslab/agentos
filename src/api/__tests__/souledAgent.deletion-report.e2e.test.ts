@@ -806,6 +806,45 @@ describe("a deletion and the open sessions, on runtime 'gmi' with sentiment on a
     expect(tracesOf(keyOf(alice))).toEqual([]);
   });
 
+  it('a turn waiting behind a running one when the person is forgotten runs on a GMI that has forgotten her', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    // How many requests the provider had served each time a session's GMI forgot its person.
+    const servedAtForget: number[] = [];
+    const forget = GMI.prototype.forgetPerson;
+    vi.spyOn(GMI.prototype, 'forgetPerson').mockImplementation(function (this: GMI) {
+      servedAtForget.push(served.seen.length);
+      return forget.call(this);
+    });
+    const a = await openGmi({ pendingWritesTimeoutMs: 50 }, [reply.text('Noted first.'), reply.hold([], gate, reply.text('Noted, held.')), ...spare()]);
+    const session = a.session('s1', { userId: 'alice' });
+    await turn(a, 's1', 'alice', 'My canary is LARK-7.');
+    const calls = served.seen.length;
+    const running = session.send('I keep it in the attic.');
+    await vi.waitFor(() => expect(served.seen.length).toBeGreaterThan(calls), { timeout: 4_000 });
+    // Her next turn waits for the session behind the running one when the deletion comes.
+    const waiting = session.send('Is the shop open today?');
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    try {
+      expect((await a.forgetUser!('alice')).parts[3]).toMatchObject({ part: 'sessions', reached: false });
+      expect(servedAtForget).toEqual([]);
+    } finally {
+      release();
+    }
+    await running;
+    await waiting;
+
+    // The session's GMI forgot her before the waiting turn's first request, not only once that turn had ended.
+    const waitingCall = served.seen.findIndex((call) => JSON.stringify(call.messages).includes('Is the shop open today?'));
+    expect(waitingCall).toBeGreaterThan(calls);
+    expect(servedAtForget[0]).toBeLessThanOrEqual(waitingCall);
+    const sent = JSON.stringify(served.seen.slice(waitingCall).map((call) => call.messages));
+    expect(sent).not.toContain('LARK-7');
+    expect(sent).not.toContain('attic');
+  });
+
   it("a deletion called from a hook of the person's own turn does not wait for that turn, and empties the session once it ends", async () => {
     const gmis = builtGmis();
     let asked = 0;
