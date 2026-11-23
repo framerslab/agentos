@@ -7,14 +7,15 @@
  *   streams its model call, as a GMI does.
  * - That default runs the light profile: no embedding is asked for, the soul's memory provider files the turn, and no
  *   message is scored for sentiment.
- * - A `channels`, `voice` or `avatar` option throws, naming the option.
+ * - A `channels`, `voice` or `avatar` option throws, naming the option. A `responseSchema`, which the GMI runtime does
+ *   not read, throws before anything opens.
  * - A session opened with a user id sends no end-user id to the model provider, and the turn's tools still read the
  *   user; `sendUserIdToProvider` sends it.
  * - A front-matter `voice` or `avatar` is left out, with one `soul.field_ignored` line each.
  * - `close()` stops a session turn still running: the turn rejects, and nothing of it is compiled.
  * - An inline soul, and an optional soul that does not load, give a plain agent on the GMI runtime too.
  * - `runtime: 'legacy'` still runs the legacy path: no GMI mark, one whole model call a turn, the three options
- *   accepted, no end-user id with or without `sendUserIdToProvider`, a running turn let finish by `close()`, and a
+ *   accepted, `generate()` validated against a `responseSchema`, no end-user id with or without `sendUserIdToProvider`, a running turn let finish by `close()`, and a
  *   plain legacy agent for an inline soul.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -23,6 +24,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import pino from 'pino';
+import { z } from 'zod';
 import { souledAgent, type SouledAgent, type SouledAgentOptions } from '../souledAgent';
 import { reply, script, type ProviderScript } from './helpers/stubProviders';
 import { resetLoggerFactory, setLogger } from '../../core/logging/loggerFactory';
@@ -77,6 +79,10 @@ function soulDir(frontmatter = ''): string {
   fs.writeFileSync(path.join(dir, 'SOUL.md'), `---\nname: Aria\nagentId: aria-1\n${frontmatter}---\nYou are Aria.`);
   return dir;
 }
+
+/** The store folders (`.store`) anywhere under `dir`: an agent that opened its soul's store made one. */
+const storeFoldersIn = (dir: string): string[] =>
+  fs.readdirSync(dir, { recursive: true, encoding: 'utf8' }).filter((entry) => path.basename(entry) === '.store');
 
 /** A tool that records the context each of its calls is given. */
 function whoami() {
@@ -176,6 +182,25 @@ describe('a souled agent with no runtime set', () => {
     ).rejects.toThrow(`gmi(): '${option}' is not available on the GMI path; remove it or use runtime: 'legacy'.`);
   });
 
+  it('throws for a responseSchema, which the GMI runtime does not read, before anything opens', async () => {
+    const k = key();
+    script('openai', k, { whole: true, replies: spare() });
+    const dir = soulDir();
+    const opening = souledAgent({
+      provider: 'openai',
+      model: 'stub-model',
+      apiKey: k,
+      fallbackProviders: [],
+      soul: dir,
+      responseSchema: z.object({ count: z.number() }),
+    } as unknown as SouledAgentOptions);
+
+    await expect(opening).rejects.toBeInstanceOf(TypeError);
+    await expect(opening).rejects.toThrow(/responseSchema.*runtime: 'legacy'/);
+    // Refused before the soul loads: no store folder was made in the soul's workspace.
+    expect(storeFoldersIn(dir)).toEqual([]);
+  });
+
   it("sends no end-user id for a session opened with a user id, and the turn's tools still read the user", async () => {
     const { a, s, told } = await open({}, [askWho(), ...spare()]);
     const session = a.session('s1', { userId: 'u-42' });
@@ -261,6 +286,12 @@ describe("a souled agent on runtime: 'legacy'", () => {
     expect(gmiMarkOf(a)).toBeUndefined();
     expect((await a.session('s1').send('Hi.')).text).toBe('Hello.');
     expect(turnCalls(s)[0].streamed).toBe(false);
+  });
+
+  it("validates generate() against the agent's responseSchema, which the GMI runtime refuses", async () => {
+    const { a } = await open({ runtime: 'legacy', responseSchema: z.object({ count: z.number() }) }, [reply.text('{"count": 3}'), ...spare()]);
+
+    expect((await a.generate('How many?')).parsed).toEqual({ count: 3 });
   });
 
   it.each([
