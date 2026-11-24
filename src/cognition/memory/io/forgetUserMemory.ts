@@ -997,7 +997,7 @@ export async function reapplyTombstones(options: ReapplyTombstonesOptions): Prom
         else addUsers(ids);
       } catch (error) {
         reports.diagnostics = { learningStoreScan: 'failed' };
-        memoryLog.warn('memory.erasure_unfinished', { store: 'learning store', ...errorFields(error) });
+        memoryLog.warn('memory.erasure_unfinished', errorFields(error));
       }
     }
     for (const subject of held) {
