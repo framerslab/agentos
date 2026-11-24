@@ -20,6 +20,7 @@
  * transaction (on Postgres, on the pool).
  */
 import type { StorageAdapter } from '@framers/sql-storage-adapter';
+import { isMissingTableError } from '../../memory/retrieval/store/missingTable.js';
 import {
   TransactionalLearningStore,
   type ChainHead,
@@ -173,6 +174,44 @@ const USER_TABLES: ReadonlyArray<[name: string, table: string]> = [
   ['sessions', 'agentos_learning_sessions'],
   ['freezes', 'agentos_learning_freezes'],
 ];
+
+/** Each learning column that names a user, including the second user of a ledger turn. */
+const LEARNER_USER_COLUMNS: ReadonlyArray<readonly [string, string]> = [
+  ['agentos_learning_sessions', 'user_id'],
+  ['agentos_learning_heads', 'user_id'],
+  ['agentos_learning_ledger', 'user_id'],
+  ['agentos_learning_ledger', 'turn_user_id'],
+  ['agentos_learning_traits', 'user_id'],
+  ['agentos_learning_freezes', 'user_id'],
+  ['agentos_learning_outcomes', 'user_id'],
+  ['agentos_learning_lessons', 'user_id'],
+  ['agentos_learning_skills', 'user_id'],
+];
+
+/**
+ * Reads the names in existing learning tables. An adapter shared with memory may have no learning schema.
+ *
+ * @internal
+ */
+export async function listSqlLearningUserIds(source: Pick<StorageAdapter, 'all'>, namespace?: string): Promise<string[]> {
+  if (namespace !== undefined && holdsLoneSurrogate(namespace)) return [];
+  const users = new Set<string>();
+  for (const [table, column] of LEARNER_USER_COLUMNS) {
+    try {
+      const rows = await source.all<{ user_id: unknown }>(
+        `SELECT DISTINCT ${column} AS user_id FROM ${table} WHERE ${column} IS NOT NULL${namespace === undefined ? '' : ' AND namespace = ?'}`,
+        namespace === undefined ? [] : [namespace],
+      );
+      for (const { user_id: id } of rows) {
+        if (typeof id === 'number') users.add(String(id));
+        else if (typeof id === 'string' && id !== '') users.add(id);
+      }
+    } catch (error) {
+      if (!isMissingTableError(error)) throw error;
+    }
+  }
+  return [...users];
+}
 
 /**
  * One transaction's handle, over the adapter's handle for that transaction. Once the transaction has ended, every call
@@ -538,6 +577,11 @@ export class SqlLearningStore extends TransactionalLearningStore {
 
   agentHasLearners(namespace: string, agentKey: string): Promise<boolean> {
     return this.transaction((tx) => tx.agentHasLearners!(namespace, agentKey));
+  }
+
+  /** Reads the namespace's named users from existing tables without creating or changing them. */
+  listUserIds(namespace: string): Promise<string[]> {
+    return listSqlLearningUserIds(this.adapter, namespace);
   }
 
   /** Leaves the adapter open: it is the host's. */

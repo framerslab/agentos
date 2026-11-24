@@ -651,3 +651,64 @@ describe.each(RUNTIMES)('with %s', (_name, runtime) => {
     });
   });
 });
+
+it.each(['gmi', 'legacy'] as const)(
+  'forgets archived originals after reopening on the %s runtime with cognitive memory off',
+  async (runtime) => {
+    const first = await open({ runtime: 'gmi', compile: false });
+    const brain = storeBrain(first);
+    const archive = new SqlStorageMemoryArchive(brain.adapter, brain.features, brain.brainId);
+    await archive.initialize();
+
+    const alice = await writeOf(await first.session('s1', { userId: 'alice' }).send('My canary is named LARK-7.'));
+    const bob = await writeOf(await first.session('s2', { userId: 'bob' }).send('My finch is named WREN-2.'));
+    const [herWrite] = alice.entries;
+    const [hisWrite] = bob.entries;
+    if (herWrite?.outcome !== 'written' || hisWrite?.outcome !== 'written') {
+      throw new Error('Both user messages must have been filed before reopening.');
+    }
+    await plantOriginal(archive, herWrite.traceId, 'My canary is named LARK-7, the yellow one.');
+    await plantOriginal(archive, hisWrite.traceId, 'My finch is named WREN-2, the brown one.');
+    expect(await archive.rehydrate(herWrite.traceId)).not.toBeNull();
+    expect(await archive.rehydrate(hisWrite.traceId)).not.toBeNull();
+    expect(await archive.lastAccessedAt(herWrite.traceId)).toEqual(expect.any(Number));
+    const bobAccess = await archive.lastAccessedAt(hisWrite.traceId);
+    expect(bobAccess).toEqual(expect.any(Number));
+    await closed(first);
+
+    const reopened = await open({ runtime, cognition: undefined, compile: false });
+    const reopenedBrain = storeBrain(reopened);
+    const reopenedArchive = new SqlStorageMemoryArchive(reopenedBrain.adapter, reopenedBrain.features, reopenedBrain.brainId);
+    expect((await reopenedArchive.list()).map(({ traceId }) => traceId)).toEqual(
+      expect.arrayContaining([herWrite.traceId, hisWrite.traceId]),
+    );
+    const beforeEmbedding = embeddings.embedded.length;
+    const beforeModel = served.seen.length;
+    embeddings.failEmbedding = () => true;
+
+    const report = await reopened.forgetUser!('alice');
+
+    expect(report.complete).toBe(true);
+    expect(await rowsUnder(reopenedBrain, keyOf('alice'))).toEqual([]);
+    expect.soft((await reopenedArchive.list()).map(({ traceId }) => traceId)).toEqual([hisWrite.traceId]);
+    expect.soft(await reopenedArchive.lastAccessedAt(herWrite.traceId)).toBeNull();
+    expect(await reopenedArchive.lastAccessedAt(hisWrite.traceId)).toBe(bobAccess);
+
+    await reopenedBrain.exec(`CREATE TRIGGER hold_archive BEFORE DELETE ON archived_traces
+      BEGIN SELECT RAISE(ABORT, 'the archive is unavailable'); END`);
+    const interrupted = await reopened.forgetUser!('bob');
+    expect(interrupted.complete).toBe(false);
+    expect(interrupted.parts[1]).toMatchObject({ part: 'mind', reached: false });
+    expect((await rowsUnder(reopenedBrain, keyOf('bob'))).map(({ id }) => id)).toContain(hisWrite.traceId);
+    expect(await reopenedArchive.lastAccessedAt(hisWrite.traceId)).toBe(bobAccess);
+
+    await reopenedBrain.exec('DROP TRIGGER hold_archive');
+    const [retried] = await reopened.applyTombstones!();
+    expect(retried.complete).toBe(true);
+    expect(await rowsUnder(reopenedBrain, keyOf('bob'))).toEqual([]);
+    expect(await reopenedArchive.list()).toEqual([]);
+    expect(await reopenedArchive.lastAccessedAt(hisWrite.traceId)).toBeNull();
+    expect(embeddings.embedded).toHaveLength(beforeEmbedding);
+    expect(served.seen).toHaveLength(beforeModel);
+  },
+);

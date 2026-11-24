@@ -51,6 +51,8 @@ export interface SoulStore {
     open: typeof openAgentMemoryBrain;
     attach(memory: LegacyGmiMemory): void;
   };
+  /** Receives the active learning store's user scan for tombstone replay. */
+  attachLearningUserScan?(listUsers: () => Promise<readonly string[] | undefined>): void;
   /** The mechanisms the agent's cognitive memory runs on that store, in place of the ones its options resolve to. */
   mechanisms: CognitiveMechanismsConfig | undefined;
   /** Told of each cognitive memory manager `gmi()` built on {@link brain}, once it is built. */
@@ -184,13 +186,12 @@ export interface SoulMind {
 }
 
 /**
- * The mind side of a souled agent on `runtime: 'gmi'`, cognitive memory on or off.
+ * The deletion side of a souled agent's cognitive memory and archive.
  *
  * @param input.managers - The cognitive memory managers the agent's sessions share in this process, read at each
  *   delete; `evictSessions` reads none of them.
  * @param input.archive - Where the mind keeps the originals of its traces in the soul's store, its tables made at the
- *   open, with how to list one key's trace ids there: what the deletes reach with no manager live. Unset (cognitive
- *   memory off): nothing is dropped there.
+ *   open, with how to list one key's trace ids there: what the deletes reach with no manager live.
  * @param input.deadlineMs - How long a deletion waits for the running turn of a session it empties; a negative
  *   number or `NaN` is 0, and a wait past the longest timer is held to it. `evictTraces` waits for no turn.
  * @internal

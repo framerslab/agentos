@@ -1293,6 +1293,19 @@ export async function learningAgentHasLearners(layer: ILearningLayer, namespace:
 }
 
 /**
+ * Reads the user ids named in the layer's active store for one namespace. Returns undefined when enumeration is
+ * unavailable, and throws if the store could not be opened or read.
+ *
+ * @internal
+ */
+export async function learningUserIds(layer: ILearningLayer, namespace: string): Promise<readonly string[] | undefined> {
+  if (!(layer instanceof LearningLayer)) return undefined;
+  const ready = await layer.storage();
+  if (!ready) throw new Error('the learning store did not open, so its users could not be listed');
+  return ready.store.listUserIds?.(namespace);
+}
+
+/**
  * Lets a layer go of a memory manager the host has shut down (`LearningLayer.releaseMemory`). A layer built by another
  * implementation of `ILearningLayer` is left as it is.
  */

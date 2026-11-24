@@ -95,6 +95,7 @@ import {
   adoptLearningMemory,
   createLearningLayer,
   learningAgentHasLearners,
+  learningUserIds,
   releaseLearningMemory,
   releaseLearningStore,
 } from '../cognition/learning/LearningLayer.js';
@@ -691,6 +692,9 @@ export function gmi(opts: GmiOptions): GmiHandle {
           : {}),
       })
     : undefined;
+  if (layer) {
+    soulStore?.attachLearningUserScan?.(() => learningUserIds(layer, learningConfig?.namespace ?? ''));
+  }
   /**
    * The key the agent's learners are filed under when `learning.agentKey` is unset (the layer lets that one win):
    * `learning.learnerKey`; else the soul's id, unless the learning store holds learner rows under the slug of the

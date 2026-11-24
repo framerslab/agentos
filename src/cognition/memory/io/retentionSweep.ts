@@ -37,7 +37,7 @@ export interface RetentionSweepOptions {
   /** The clock, in Unix ms. Default `Date.now`. */
   now?: () => number;
   /**
-   * The mind of a souled agent on `runtime: 'gmi'` with cognitive memory on, which files into this store: each
+   * The deletion side of a souled agent's mind, on either runtime and with cognitive memory on or off: each
    * scope's expired traces are deleted through it before the store's own delete, with what it keeps of each (its cached
    * copy, vector, memory-graph node and archived original), and dropped from the subject's open sessions
    * (`sessionsOf`) once they are gone. A delete of the mind that fails leaves the scope's traces for the next sweep and
