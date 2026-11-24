@@ -1,16 +1,16 @@
 import { describe, expect, it, vi } from 'vitest';
 import * as memory from '../../index.js';
 
-// Keep the test-only commit compilable against the public entry point.
-const resolve = Reflect.get(memory, 'resolveExtractionPolicy');
+import { resolveExtractionTurnId } from '../policy.js';
+
+const { resolveExtractionPolicy: resolve } = memory;
 
 const invoker = { invoke: vi.fn(async () => '{"facts":[]}') };
 const stageInvoker = vi.fn(async () => '{"facts":[]}');
 
 describe('conversational extraction policy', () => {
   it('resolves enclosing vetoes and preserves legacy omission', () => {
-    expect(resolve).toBeTypeOf('function');
-    const mode = (...args: unknown[]) => resolve(...args).path;
+    const mode = (...args: Parameters<typeof resolve>) => resolve(...args).path;
     const omitted = {};
     const runtimeTrue = { extraction: true };
     const personaFalse = { extraction: false };
@@ -26,6 +26,7 @@ describe('conversational extraction policy', () => {
     expect(mode(runtimeTrue, {}, {}, { mode: 'raw' })).toBe('off');
     expect(mode(runtimeTrue, {}, {}, { forgotten: true })).toBe('off');
     expect(mode({}, {}, {}, { mode: 'off' })).toBe('off');
+    expect(mode({}, {}, {}, { allowExternalProcessing: false })).toBe('off');
   });
 
   it('cuts the reflection handoff, queue and typed-bank writes at their stage switches', () => {
@@ -109,7 +110,7 @@ describe('conversational extraction policy', () => {
       observer: { llmInvoker: stageInvoker },
       reflector: { llmInvoker: stageInvoker },
       typedNetwork: { variant: 'full', observerLLM: invoker },
-    };
+    } satisfies Parameters<typeof resolve>[0];
     for (const policy of [
       resolve({ ...runtime, extraction: { invoker, mode: 'classical' } }),
       resolve(runtime, {}, { role: 'assistant' }),
@@ -117,9 +118,11 @@ describe('conversational extraction policy', () => {
     ]) {
       expect(policy.path).toBe('classical');
       expect(policy.invoker).toBeUndefined();
-      expect(policy.observer.llmInvoker).toBeUndefined();
-      expect(policy.reflector.llmInvoker).toBeUndefined();
-      expect(policy.typedNetwork.observerLLM).toBeUndefined();
+      expect(policy).toMatchObject({
+        observer: { llmInvoker: undefined },
+        reflector: { llmInvoker: undefined },
+        typedNetwork: { observerLLM: undefined },
+      });
     }
 
     const off = resolve(runtime, { extraction: false });
@@ -139,7 +142,11 @@ describe('conversational extraction policy', () => {
 
   it('resolves caller intent from the original options before filing defaults', () => {
     const runtime = { extraction: true };
-    const conversation = { inputKind: 'conversation', type: 'episodic', tags: ['chat'] };
+    const conversation = {
+      inputKind: 'conversation',
+      type: 'episodic',
+      tags: ['chat'],
+    } satisfies memory.ExtractionIntent;
     expect(resolve(runtime, {}, conversation).path).toBe('auto');
     expect(resolve(runtime, {}, { tags: ['topic'] }).path).toBe('auto');
     for (const options of [
@@ -153,9 +160,16 @@ describe('conversational extraction policy', () => {
       { ...conversation, sourceType: 'tool_result' },
       { ...conversation, role: 'system' },
       { ...conversation, role: 'tool' },
-    ]) {
+    ] satisfies memory.ExtractionIntent[]) {
       expect(resolve(runtime, {}, options).path).toBe('off');
     }
+  });
+
+  it('reuses a paired source identifier and assigns distinct IDs to bare calls', () => {
+    expect(resolveExtractionTurnId('paired-turn')).toBe('paired-turn');
+    const first = resolveExtractionTurnId();
+    expect(first).toBeTruthy();
+    expect(resolveExtractionTurnId()).not.toBe(first);
   });
 
   it('keeps omitted standalone extraction literal and observe unsupported', async () => {
@@ -166,6 +180,7 @@ describe('conversational extraction policy', () => {
       expect(result.success).toBe(true);
       expect(result.trace?.content).toBe(text);
       expect(result.trace?.type).toBe('episodic');
+      expect((await instance.health()).totalTraces).toBe(1);
       expect((await instance.recall('matte paper')).memories.map((trace) => trace.id)).toEqual([
         result.trace?.id,
       ]);
@@ -177,19 +192,23 @@ describe('conversational extraction policy', () => {
     }
   });
 
+  const managerConfig: memory.CognitiveMemoryConfig = {
+    agentId: 'memory-policy-test',
+    traits: {},
+    moodProvider: () => ({ valence: 0, arousal: 0, dominance: 0 }),
+    graph: { disabled: true },
+    workingMemory: {} as memory.CognitiveMemoryConfig['workingMemory'],
+    embeddingManager: {} as memory.CognitiveMemoryConfig['embeddingManager'],
+    knowledgeGraph: {} as memory.CognitiveMemoryConfig['knowledgeGraph'],
+    vectorStore: {} as memory.CognitiveMemoryConfig['vectorStore'],
+  };
+
   it('keeps the manual typed-network observer available under omission', async () => {
     const manager = new memory.CognitiveMemoryManager();
     const invoke = vi.fn(async () => '{"facts":[]}');
     try {
       await manager.initialize({
-        agentId: 'memory-policy-test',
-        traits: {},
-        moodProvider: () => ({ valence: 0, arousal: 0, dominance: 0 }),
-        graph: { disabled: true },
-        workingMemory: {} as memory.CognitiveMemoryConfig['workingMemory'],
-        embeddingManager: {} as memory.CognitiveMemoryConfig['embeddingManager'],
-        knowledgeGraph: {} as memory.CognitiveMemoryConfig['knowledgeGraph'],
-        vectorStore: {} as memory.CognitiveMemoryConfig['vectorStore'],
+        ...managerConfig,
         typedNetwork: { variant: 'minimal', observerLLM: { invoke } },
       });
       expect(invoke).not.toHaveBeenCalled();
@@ -197,6 +216,39 @@ describe('conversational extraction policy', () => {
       expect(observer).not.toBeNull();
       expect(await observer?.extract('I prefer matte paper.', 'trace-1')).toEqual([]);
       expect(invoke).toHaveBeenCalledOnce();
+    } finally {
+      await manager.shutdown();
+    }
+  });
+
+  it('opens an explicit classical policy without a legacy typed-network invoker', async () => {
+    const manager = new memory.CognitiveMemoryManager();
+    try {
+      await manager.initialize({
+        ...managerConfig,
+        extraction: { mode: 'classical' },
+        typedNetwork: { variant: 'full' },
+      });
+      expect(manager.getTypedNetworkObserver()).toBeNull();
+    } finally {
+      await manager.shutdown();
+    }
+  });
+
+  it('leaves the legacy extraction stages inactive under an enclosing opt-out', async () => {
+    const manager = new memory.CognitiveMemoryManager();
+    try {
+      await manager.initialize({
+        ...managerConfig,
+        extraction: false,
+        observer: { llmInvoker: stageInvoker },
+        reflector: { llmInvoker: stageInvoker },
+        typedNetwork: { variant: 'full', extractAtEncode: true, observerLLM: invoker },
+      });
+      expect(manager.getTypedNetworkObserver()).toBeNull();
+      expect(manager.getTypedNetworkStore()).toBeNull();
+      await expect(manager.observe('user', 'I prefer matte paper.')).resolves.toBeNull();
+      expect(stageInvoker).not.toHaveBeenCalled();
     } finally {
       await manager.shutdown();
     }

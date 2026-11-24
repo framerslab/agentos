@@ -48,6 +48,11 @@ import type {
   TrustCapability,
 } from './core/types.js';
 import type { PADState, CognitiveMemoryConfig } from './core/config.js';
+import type {
+  ExtractionCallOptions,
+  ExtractionObservationOptions,
+  ExtractionRole,
+} from './extraction/policy.js';
 import type { ICognitiveMemoryManager } from './CognitiveMemoryManager.js';
 import { CognitiveMemoryManager } from './CognitiveMemoryManager.js';
 import type { ObservationNote } from './pipeline/observation/MemoryObserver.js';
@@ -211,10 +216,12 @@ export class AgentMemory {
    */
   async remember(
     content: string,
-    options?: {
+    options?: ExtractionCallOptions & {
+      /** A supplied type marks a record unless the caller affirms conversation. */
       type?: MemoryType;
       scope?: MemoryScope;
       scopeId?: string;
+      /** Curated, document and tool provenance takes precedence over a conversational hint. */
       sourceType?: MemorySourceType;
       tags?: string[];
       entities?: string[];
@@ -309,9 +316,9 @@ export class AgentMemory {
    * await memory.observe('assistant', "Sure! The issue is in your useEffect...");
    */
   async observe(
-    role: 'user' | 'assistant' | 'system' | 'tool',
+    role: ExtractionRole,
     content: string,
-    options?: { currentMood?: PADState; contentSentiment?: number },
+    options?: ExtractionObservationOptions & { currentMood?: PADState; contentSentiment?: number },
   ): Promise<ObservationNote[] | null> {
     this.ensureReady();
     if (!this.manager) {

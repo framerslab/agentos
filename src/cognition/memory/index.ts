@@ -435,6 +435,19 @@ export {
 // Orchestrator (root level)
 // ---------------------------------------------------------------------------
 
+export { resolveExtractionPolicy } from './extraction/policy.js';
+export type {
+  ExtractionCallOptions,
+  ExtractionHostPolicy,
+  ExtractionIntent,
+  ExtractionObservationOptions,
+  ExtractionOptions,
+  ExtractionRole,
+  ExtractionSetting,
+  PersonaExtractionOptions,
+  ResolvedExtractionPolicy,
+} from './extraction/policy.js';
+
 export { CognitiveMemoryManager } from './CognitiveMemoryManager.js';
 export type { ICognitiveMemoryManager, FlushReflectionResult, MemoryDeletion } from './CognitiveMemoryManager.js';
 

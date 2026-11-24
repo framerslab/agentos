@@ -11,6 +11,8 @@
 import type { MemoryRetrievalPolicy } from '../../../rag/unified/policy.js';
 import type { PathNameProblem } from '../../../../core/utils/pathName.js';
 import type { ForgottenLedger, ForgottenLedgerOptions } from '../../suppression/ForgottenLedger.js';
+import type { MemorySourceType } from '../../core/types.js';
+import type { ExtractionCallOptions, ExtractionSetting } from '../../extraction/policy.js';
 
 // ---------------------------------------------------------------------------
 // Embedding configuration
@@ -201,6 +203,13 @@ export interface IngestionConfig {
  */
 export interface MemoryConfig {
   /**
+   * Conversational extraction policy. Omit to keep legacy literal writes.
+   * True or an object selects extraction stages. False opts out of
+   * conversational extraction while keeping ordinary memory writes.
+   */
+  extraction?: ExtractionSetting;
+
+  /**
    * Persistence backend for memory traces.
    *
    * The Phase 1 facade currently implements the SQLite path at runtime.
@@ -314,9 +323,13 @@ export interface MemoryConfig {
 /**
  * Options for storing a new memory trace via `Memory.remember()`.
  */
-export interface RememberOptions {
+export interface RememberOptions extends ExtractionCallOptions {
+  /** Original provenance for deciding whether this write is conversational. */
+  sourceType?: MemorySourceType;
+
   /**
-   * Tulving memory type.
+   * Tulving memory type. A supplied type marks a record unless the caller
+   * affirms conversation and the source is otherwise eligible.
    * @example 'episodic' | 'semantic' | 'procedural' | 'prospective'
    */
   type?: string;

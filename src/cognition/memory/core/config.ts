@@ -11,6 +11,7 @@ import type { MemoryBudgetAllocation } from './types.js';
 import type { RecallCaptureMode } from '../retrieval/recall/capture.js';
 import type { RecallConstants } from '../retrieval/recall/fuse.js';
 import type { InfiniteContextConfig } from '../pipeline/context/types.js';
+import type { ExtractionSetting, PersonaExtractionOptions } from '../extraction/policy.js';
 
 // ---------------------------------------------------------------------------
 // PAD state (inlined to avoid circular dep with wunderland)
@@ -236,6 +237,12 @@ export interface ConsolidationConfig {
  */
 export interface CognitiveMemoryPersonaConfig {
   /**
+   * Serializable conversational extraction defaults. Runtime settings take
+   * precedence except that false at either level vetoes extraction.
+   */
+  extraction?: boolean | PersonaExtractionOptions;
+
+  /**
    * Feature detection strategy. Nothing in agentos reads it yet:
    * `createAgentCognitiveMemory` runs `'keyword'`, as it has no LLM invoker for
    * `'llm'` or `'hybrid'`.
@@ -303,6 +310,13 @@ export interface CognitiveMemoryPersonaConfig {
 // ---------------------------------------------------------------------------
 
 export interface CognitiveMemoryConfig {
+  /**
+   * Conversational extraction policy. Omit to keep legacy memory behavior.
+   * True or an object selects extraction stages. False opts out even when
+   * legacy callbacks or persona defaults are supplied.
+   */
+  extraction?: ExtractionSetting;
+
   // --- Existing AgentOS dependencies ---
   workingMemory: IWorkingMemory;
   knowledgeGraph: IKnowledgeGraph;
@@ -630,8 +644,12 @@ export interface TypedNetworkRuntimeConfig {
    * - `'full'`: minimal + spreading activation + 4-way RRF at retrieve.
    */
   variant: 'minimal' | 'full';
-  /** LLM adapter for the 6-step extraction call. */
-  observerLLM: import('../retrieval/typed-network/index.js').ITypedExtractionLLM;
+  /**
+   * LLM adapter for the legacy manual extraction call. Required on the
+   * legacy path. The conversational extraction policy supports local stages
+   * and can resolve a model independently.
+   */
+  observerLLM?: import('../retrieval/typed-network/index.js').ITypedExtractionLLM;
   /**
    * Whether `encode()` invokes the typed-network observer per call.
    *
@@ -641,7 +659,9 @@ export interface TypedNetworkRuntimeConfig {
    * - `true`: manager calls the observer on every `encode()` with the full input
    *   text and writes facts into the store namespaced by the trace ID.
    *
-   * Default is `false` to prevent the bench-style double-extraction pattern
+   * With explicit conversational extraction, false vetoes the encode trigger
+   * while leaving the enabled typed-network stage available for other uses.
+   * On the legacy path the default is false, to prevent the double-extraction pattern
    * (manager extracts per-encode AND consumer extracts per-session). When in
    * doubt, leave this `false` and let the consumer drive extraction explicitly.
    */
