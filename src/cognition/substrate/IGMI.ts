@@ -252,6 +252,8 @@ export interface GMIModelCallContext {
   hop: number;
   providerId: string;
   modelId: string;
+  /** The validation feedback that prompted this model step, on a schema repair. @internal */
+  schemaRepairPrompt?: string;
   /** The attempt's prompt, system messages included. A copy: return the messages to send instead. */
   messages: ChatMessage[];
 }
@@ -384,6 +386,11 @@ export interface GMITurnInput {
      * their own session id, which is no user's. A learning layer reads such a turn's user as `null`.
      */
     noTurnUser?: boolean;
+    /** Checks a completed reply after the host's generation hook, before the turn commits. @internal */
+    onTurnReply?: (canRepair: boolean) =>
+      | { kind: 'accepted'; text: string }
+      | { kind: 'repair'; text: string; prompt: string }
+      | { kind: 'rejected' };
     /** Called at the GMI's commit point, before after-turn work starts. @internal */
     onTurnCommitted?: () => void;
     /**

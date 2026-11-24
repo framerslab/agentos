@@ -50,7 +50,7 @@ describe.each(constructors)('$name response schema', ({ create }) => {
   }
   const setup = (...replies: string[]) => setupWith({}, ...replies);
 
-  it('sends a repair turn and rejects with the final validation error', async () => {
+  it('requests a repair and rejects with the final validation error', async () => {
     const first = 'three';
     const last = '{"count":"still three"}';
     const { handle, provider } = setup(first, last);
@@ -106,10 +106,9 @@ describe.each(constructors)('$name response schema', ({ create }) => {
   it("states the agent's schema when the call passes a response format of its own", async () => {
     const { handle, provider } = setup('{"count":3}');
     try {
-      // No typed generate() option: the GMI runtime sends a call's own payload format to the provider, and that
-      // format's schema is the caller's, which need not be the agent's.
-      const ownFormat = { responseFormat: { type: 'json_schema', json_schema: { name: 'anything', schema: { type: 'object' } } } };
-      const result = await handle.generate(question, ownFormat as unknown as Parameters<Agent['generate']>[1]);
+      const result = await handle.generate(question, {
+        responseFormat: { type: 'json_schema', json_schema: { name: 'anything', schema: { type: 'object' } } },
+      });
       expect(result.parsed).toEqual({ count: 3 });
       expect(provider.seen).toHaveLength(1);
       expect(systemText(provider.seen[0])).toContain(SCHEMA_INSTRUCTION_LEAD);

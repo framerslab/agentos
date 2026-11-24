@@ -33,6 +33,7 @@ import { moduleLogger } from '../core/logging/loggerFactory.js';
 import { listedErrorFields, providerName, safePath } from '../core/logging/events.js';
 import { isCallMask } from './runtime/pool/redact.js';
 import { createContentSafeConsole } from '../core/logging/contentSafeConsole.js';
+import type { ModelCompletionOptions } from '../core/llm/providers/IProvider.js';
 import type { AgentCallRecord, AgencyTraceEvent } from './types.js';
 import { globalLLMProviderHealth } from '../core/safety/LLMProviderHealthRegistry.js';
 import { CONTEXT_WINDOW_EXCEEDED_CODE } from '../core/llm/providers/errors/errorCodes.js';
@@ -493,6 +494,15 @@ export interface GenerateTextOptions {
    * the prompt-emulation shim).
    */
   toolChoice?: string | Record<string, unknown>;
+  /**
+   * Provider-specific response format for one call of an agent on the GMI
+   * runtime: its `generate()` and `stream()` send it with the call's requests.
+   * With an agent-level `responseSchema`, `generate()` still states that
+   * schema in each request and validates the reply against it.
+   * `generateText()`, `streamText()` and an agent on the legacy runtime
+   * ignore this option.
+   */
+  responseFormat?: ModelCompletionOptions['responseFormat'];
   /**
    * Per-call request timeout in milliseconds, forwarded to the provider for
    * this call only. Large-output callers (e.g. structured-output generation

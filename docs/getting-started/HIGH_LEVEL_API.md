@@ -226,7 +226,7 @@ if (result.refusal !== undefined) {
 
 When an OpenAI model refuses a request with a refusal message, `generateText()` returns the message in `refusal`, beside the `finishReason` and the empty `text` such an answer has always come back with: `'stop'`, or `'length'` when the output cap cut the message off. `refusal` is set only when the model refused, so `result.refusal !== undefined` tells a refusal from an empty answer. An explicit refusal with an empty message is a refusal too, its `refusal` the empty string, on both OpenAI endpoints, whole or streamed, and when the output cap cut it. On Chat Completions an empty refusal field beside text or tool calls holds no refusal: the answer is that text or those calls. The call does not throw, and nothing is sent to a fallback provider. `streamText()` sends no text part for it. Its `finishReason` and `refusal` promises settle as the stream is read, as `text` does: once `textStream` or `fullStream` has been read to its end, `await result.refusal` is the message, `await result.finishReason` is `'stop'` (`'length'` when the output cap cut the message off) and `await result.text` is the empty string, also when an earlier tool step streamed text of its own. When the model wrote text beside the refusal message in the same reply, `text` keeps that text on both functions, and `refusal` still says the model refused. A stream that ends inside a refusal message, an empty one included, before the answer's finish ends on an `error` part, with `finishReason` `'error'` and no `refusal`.
 
-A call with tools returns a refusal the same way, in prompt tool mode (`toolMode: 'prompt'`) too. When the model sends tool calls beside its refusal message, the call ends on the refusal with `finishReason` `'stop'`, and those tool calls are not run. A refusal the output cap cut off is a cut answer: `finishReason` is `'length'`, `refusal` holds the piece of the message that came and `text` is empty, in prompt tool mode as well. A result the model did not refuse has no `refusal`. `generateObject()` and an agent's `responseSchema` end on a refusal without asking for a repair: they throw [`ObjectGenerationError`](../orchestration/STRUCTURED_OUTPUT_API.md#errors) with the message in its `refusal`. The usage event of a refused call carries `refused: true` ([a refused call](../observability/OBSERVABILITY.md#a-refused-call)). A GMI session (`runtime: 'gmi'`) and a runtime agency seat return a refused answer with its finish reason and an empty text, and no `refusal`; tool calls the model sent beside the refusal are not run there either, and the turn ends on `'stop'`. A structured turn on the full runtime (`processRequest()` with `structuredReply`) ends on a refusal without a repair request too ([structured reply](../features/STRUCTURED_REPLY.md#what-the-turn-does)). [OpenAI](../features/LLM_PROVIDERS.md#openai) describes what the provider reads. Claude's refusal arrives another way: the provider throws an error with code `content_filter` ([Anthropic](../features/LLM_PROVIDERS.md#anthropic)).
+A call with tools returns a refusal the same way, in prompt tool mode (`toolMode: 'prompt'`) too. When the model sends tool calls beside its refusal message, the call ends on the refusal with `finishReason` `'stop'`, and those tool calls are not run. A refusal the output cap cut off is a cut answer: `finishReason` is `'length'`, `refusal` holds the piece of the message that came and `text` is empty, in prompt tool mode as well. A result the model did not refuse has no `refusal`. `generateObject()` and an agent's `responseSchema` end on a refusal without asking for a repair: they throw [`ObjectGenerationError`](../orchestration/STRUCTURED_OUTPUT_API.md#errors) with the message in its `refusal`. The usage event of a refused call carries `refused: true` ([a refused call](../observability/OBSERVABILITY.md#a-refused-call)). A GMI session (`runtime: 'gmi'`) returns the refusal message in `refusal` and preserves any text the model wrote beside it in `text`. The refusal message can be empty. On GMI sessions and runtime agency seats, tool calls beside a refusal are skipped and the turn ends on `'stop'`. A structured turn on the full runtime (`processRequest()` with `structuredReply`) ends on a refusal without a repair request too ([structured reply](../features/STRUCTURED_REPLY.md#what-the-turn-does)). [OpenAI](../features/LLM_PROVIDERS.md#openai) describes what the provider reads. Claude's refusal arrives another way: the provider throws an error with code `content_filter` ([Anthropic](../features/LLM_PROVIDERS.md#anthropic)).
 
 The finish reasons are the four they were (`'stop'`, `'length'`, `'tool-calls'`, `'error'`), so code that lists every one of them compiles and runs as it did. A caller that does not read `refusal` sees these differences from the releases before the field:
 
@@ -1003,12 +1003,20 @@ const result = await session.send('Count the records.', {
 });
 ```
 
-On the legacy runtime, session sends default to zero extra attempts. Each retry includes the failed
+Session sends default to zero extra attempts on both runtimes. Each repair includes the failed
 reply and validation feedback. Only the original user input and final valid
-reply enter session history; an exhausted send adds nothing. Usage totals count
-every completed attempt. Retry counts must be non-negative integers. Schema
-sends omit configured tools and their chain-of-thought instruction. On the GMI
-runtime, schema sends reject an invalid reply without a repair turn.
+reply enter session history. Usage totals count every completed attempt.
+Retry counts must be non-negative integers. Schema sends omit configured tools
+and their chain-of-thought instruction.
+
+On the GMI runtime, validation and repairs for `generate()` and schema sends
+stay inside the original turn, before its commit point. A repair has the full
+current turn, including the question and any tool results, and earlier turns
+are still subject to the history limit. The turn commits once the answer passes
+validation. When the turn files cognitive memory, it files only the original
+question and the accepted answer. A souled agent's mind files after the session
+accepts the reply. If every attempt fails, the turn adds nothing to memory or
+session history.
 
 For schema calls, `memoryProvider.observe` records the original user input once
 and only the accepted answer, after caller hooks and validation. Failed attempts
@@ -1297,10 +1305,10 @@ A person's own memory: **`await agent.exportUserMemory(userId)`** returns their 
 
 On a souled agent with `runtime: 'gmi'` and cognitive memory enabled, the export covers the user's stored turns from both filing paths.
 `provided.messages` contains the user's own messages. `held.traces` includes both speakers' traces with their filing side, emotional context,
-and strength fields. `held.archivedOriginals` includes available originals for those traces, and `held.graphLinks` contains links between the
-user's traces from the store and the live cognitive memory graph; a link both hold is listed once, with the store's weight. `held.typedFacts`
+and strength fields. `held.graphLinks` contains links between the user's traces from the store and the live cognitive memory graph.
+A link both hold is listed once, with the store's weight. `held.typedFacts`
 is empty because a souled agent extracts no typed facts.
-The export is scoped to that user, excluding other users' memory and operator pages.
+On either runtime, `held.archivedOriginals` includes available originals for the exported traces, even after reopening with cognitive memory off. The export is scoped to that user, excluding other users' memory and operator pages.
 
 One `Memory` facade backs both the live memory and the wiki. The operator's pages are markdown files and the source of truth for themselves: their index entries in the store are rebuilt from them. Per-user traces and pages live in the store alone. `souledAgent()` accepts every `agent()` option and returns the same `Agent`, plus `agent.memory` (the store) when the soul resolves to a workspace directory. An inline soul (`{ content }`) has no workspace, so it falls back to a plain agent on the same runtime and says so in one warning line. Closing the agent also closes the store; an adapter you passed as `soulStore` or `tombstoneCopy` stays open, and a write that reaches the closed store through it is not stored. What applies on each way of loading a soul is tabled in [Soul Files](../SOUL_FILES.md#what-applies-on-each-path).
 
