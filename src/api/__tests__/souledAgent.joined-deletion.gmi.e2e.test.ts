@@ -712,3 +712,39 @@ it.each(['gmi', 'legacy'] as const)(
     expect(served.seen).toHaveLength(beforeModel);
   },
 );
+
+it.each(['gmi', 'legacy'] as const)(
+  'exports only the subject’s archived original after reopening on the %s runtime with cognitive memory off',
+  async (runtime) => {
+    const first = await open({ runtime: 'gmi', compile: false });
+    const brain = storeBrain(first);
+    const archive = new SqlStorageMemoryArchive(brain.adapter, brain.features, brain.brainId);
+    await archive.initialize();
+
+    const alice = await writeOf(await first.session('s1', { userId: 'alice' }).send('My canary is named LARK-7.'));
+    const bob = await writeOf(await first.session('s2', { userId: 'bob' }).send('My finch is named WREN-2.'));
+    const [herWrite] = alice.entries;
+    const [hisWrite] = bob.entries;
+    if (herWrite?.outcome !== 'written' || hisWrite?.outcome !== 'written') {
+      throw new Error('Both user messages must have been filed before reopening.');
+    }
+    const herOriginal = 'My canary is named LARK-7, the yellow one.';
+    const hisOriginal = 'My finch is named WREN-2, the brown one.';
+    await plantOriginal(archive, herWrite.traceId, herOriginal);
+    await plantOriginal(archive, hisWrite.traceId, hisOriginal);
+    await closed(first);
+
+    const reopened = await open({ runtime, cognition: undefined, compile: false });
+    const reopenedBrain = storeBrain(reopened);
+    const reopenedArchive = new SqlStorageMemoryArchive(reopenedBrain.adapter, reopenedBrain.features, reopenedBrain.brainId);
+    expect((await reopenedArchive.list()).map(({ traceId }) => traceId)).toEqual(
+      expect.arrayContaining([herWrite.traceId, hisWrite.traceId]),
+    );
+
+    const result = await reopened.exportUserMemory!('alice');
+
+    expect(result.held.traces.map(({ id }) => id)).toContain(herWrite.traceId);
+    expect(result.unread.map(({ store }) => store)).not.toContain('archived originals');
+    expect(result.held.archivedOriginals).toEqual([{ traceId: herWrite.traceId, text: herOriginal }]);
+  },
+);
