@@ -222,6 +222,7 @@ export type {
   LegacyDeletion,
   ReapplyTombstonesOptions,
   SubjectPages,
+  TombstoneReplayResult,
 } from './cognition/memory/io/forgetUserMemory.js';
 // Query Router (classification, retrieval dispatch, grounded answer generation)
 export {

@@ -547,7 +547,7 @@ export interface SubjectCorrectionOptions {
   /** Runs the change in the subject's turn, after its writes and compiles. Unset: at once. */
   onChain?: <T>(work: () => Promise<T>) => Promise<T>;
   /**
-   * The mind of a souled agent on `runtime: 'gmi'` with cognitive memory on, which files into this store: the named
+   * The deletion side of a souled agent's mind, on either runtime and with cognitive memory on or off: the named
    * traces are deleted through it before the store's own delete, with what it keeps of each (its cached copy, vector,
    * memory-graph node and archived original), and dropped from the subject's open sessions once they are gone. A
    * delete of the mind that fails rejects the call, and the same call made again finishes it.

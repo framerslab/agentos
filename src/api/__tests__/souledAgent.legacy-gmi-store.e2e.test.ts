@@ -504,6 +504,149 @@ describe.each(RUNTIMES)('with %s', (_name, runtime) => {
       }
     });
 
+    it('purges a forgotten person’s rows when only the separate learning store is restored', async () => {
+      const learningFile = join(directory, 'learning.sqlite');
+      const saved = join(directory, 'learning-backup.sqlite');
+      let own = await separateLearning();
+      try {
+        const initial = own.learning();
+        await seed({ path: legacyFile }, initial);
+        const alice = await initial.store!.sessionRowsOf(learning.namespace, ALICE);
+        const bob = await initial.store!.sessionRowsOf(learning.namespace, BOB);
+        expect(alice).not.toEqual([]);
+        expect(bob).not.toEqual([]);
+        await own.close();
+        copyFileSync(learningFile, saved);
+
+        own = await separateLearning();
+        const live = own.learning();
+        const first = await open({ path: legacyFile }, live);
+        expect((await first.forgetUser!(ALICE)).complete).toBe(true);
+        expect(await legacyRows(ALICE)).toEqual([]);
+        expect(await live.store!.sessionRowsOf(learning.namespace, ALICE)).toEqual([]);
+        await close();
+        await own.close();
+
+        copyFileSync(saved, learningFile);
+        for (const suffix of ['-wal', '-shm']) rmSync(learningFile + suffix, { force: true });
+        own = await separateLearning();
+        const restored = own.learning();
+        expect(await restored.store!.sessionRowsOf(learning.namespace, ALICE)).toEqual(alice);
+
+        const reopened = await open({ path: legacyFile }, restored);
+        expect.soft(await restored.store!.sessionRowsOf(learning.namespace, ALICE)).toEqual([]);
+        expect(await reopened.applyTombstones!()).toEqual([]);
+        expect.soft(await restored.store!.sessionRowsOf(learning.namespace, ALICE)).toEqual([]);
+        expect(await restored.store!.sessionRowsOf(learning.namespace, BOB)).toEqual(bob);
+      } finally {
+        await close();
+        await own.close();
+      }
+    });
+
+    it('resumes a passed-store forget interrupted before its trace IDs were recorded', async () => {
+      const own = await separateLearning();
+      try {
+        const configured = own.learning();
+        const passed = await resolveStorageAdapter({ filePath: legacyFile, priority: ['better-sqlite3'], quiet: true });
+        adapter = passed;
+        await seed({ adapter: passed }, configured);
+        const id = await legacyCanaryId();
+        const bob = await legacyRows(BOB);
+        const trace = await passed.get<{ metadata: string | null }>(
+          "SELECT metadata FROM memory_traces WHERE brain_id = ? AND id = ? AND scope = 'user' AND scope_id = ?",
+          [AGENT_ID, id, userScope(ALICE)],
+        );
+        expect(trace).toBeTruthy();
+        expect(JSON.parse(trace?.metadata ?? '{}')).not.toHaveProperty('turnUserId');
+        expect(await passed.all("SELECT name FROM sqlite_master WHERE type = 'table' AND name GLOB 'agentos_learning_*'")).toEqual([]);
+        expect(await configured.store!.sessionRowsOf(learning.namespace, ALICE)).not.toEqual([]);
+
+        const first = await open({ adapter: passed }, configured);
+        expect(await first.memory!.listHeldSubjects()).toEqual([]);
+        const read = passed.all.bind(passed);
+        const fault = vi.spyOn(passed, 'all').mockImplementation((sql, params) => {
+          if (
+            sql === 'SELECT id FROM memory_traces WHERE brain_id = ? AND scope = ? AND scope_id = ?' &&
+            Array.isArray(params) && params[2] === userScope(ALICE)
+          ) {
+            return Promise.reject(new Error('The passed trace read was interrupted.'));
+          }
+          return read(sql, params);
+        });
+        const interrupted = await first.forgetUser!(ALICE);
+        fault.mockRestore();
+        expect(interrupted.complete).toBe(false);
+        expect(interrupted.tombstone).toEqual({ form: 'keyed', written: true });
+        expect(interrupted.stores).toContainEqual({
+          store: STORE_LABEL, reached: false, reason: expect.stringContaining('could not be recorded'),
+        });
+        const ledger = first.memory!.forgotten!;
+        expect(await ledger.isForgotten({ kind: 'user', id: ALICE })).toBe(true);
+        expect(await ledger.deletedTraceIds()).toEqual([]);
+        expect(await legacyCanaryId()).toBe(id);
+        expect(await configured.store!.sessionRowsOf(learning.namespace, ALICE)).not.toEqual([]);
+        await close();
+
+        const reopened = await open({ adapter: passed }, configured);
+        expect.soft(await legacyRows(ALICE)).toEqual([]);
+        expect.soft(await configured.store!.sessionRowsOf(learning.namespace, ALICE)).toEqual([]);
+        expect(await legacyRows(BOB)).toEqual(bob);
+        expect((await reopened.forgetUser!(ALICE)).complete).toBe(true);
+        expect(await legacyRows(ALICE)).toEqual([]);
+        expect(await configured.store!.sessionRowsOf(learning.namespace, ALICE)).toEqual([]);
+      } finally {
+        await close();
+        await own.close();
+      }
+    });
+
+    it('reports an unavailable or failed learning-store scan and retries it', async () => {
+      const own = await separateLearning();
+      try {
+        const configured = own.learning();
+        const store = configured.store!;
+        await seed({ path: legacyFile }, configured);
+        const [alice] = await store.sessionRowsOf(learning.namespace, ALICE);
+        expect(alice).toBeDefined();
+        const first = await open({ path: legacyFile }, configured);
+        expect((await first.forgetUser!(ALICE)).complete).toBe(true);
+        await close();
+
+        // Restore the session row through the store. The same id in another namespace names a different person.
+        const otherNamespace = 'orchard/elsewhere';
+        await store.putSessionRow(alice);
+        await store.putSessionRow({ ...alice, namespace: otherNamespace });
+        Object.defineProperty(store, 'listUserIds', { configurable: true, value: undefined });
+        events.length = 0;
+        const reopened = await open({ path: legacyFile }, configured);
+        expect(events).toContainEqual(expect.objectContaining({
+          event: 'memory.tombstone_reapplied', learningStoreScan: 'unavailable',
+        }));
+        const unavailable = await reopened.applyTombstones!();
+        expect(unavailable).toHaveLength(0);
+        expect(unavailable.diagnostics).toEqual({ learningStoreScan: 'unavailable' });
+        expect(await store.sessionRowsOf(learning.namespace, ALICE)).toEqual([alice]);
+
+        Reflect.deleteProperty(store, 'listUserIds');
+        vi.spyOn(store, 'listUserIds').mockRejectedValueOnce(new Error('The learning rows could not be read.'));
+        const failed = await reopened.applyTombstones!();
+        expect(failed).toHaveLength(0);
+        expect(failed.diagnostics).toEqual({ learningStoreScan: 'failed' });
+
+        const retried = await reopened.applyTombstones!();
+        expect(retried).toHaveLength(1);
+        expect(retried[0].complete).toBe(true);
+        expect(retried.diagnostics).toBeUndefined();
+        expect(await store.sessionRowsOf(learning.namespace, ALICE)).toEqual([]);
+        expect(await store.sessionRowsOf(otherNamespace, ALICE)).toEqual([{ ...alice, namespace: otherNamespace }]);
+        expect(await reopened.applyTombstones!()).toEqual([]);
+      } finally {
+        await close();
+        await own.close();
+      }
+    });
+
     it('forgets the persona notes the passed store indexes for the person when learning moved to a store of its own', async () => {
       await seed();
       const note = await plantPersonaNote(await legacyCanaryId());
