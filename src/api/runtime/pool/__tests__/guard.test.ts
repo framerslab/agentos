@@ -17,7 +17,7 @@ const PANEL_DECISION: Record<keyof GenerateTextOptions, 'allow' | 'deny'> = {
   fallbackProviders: 'deny', onFallback: 'deny', source: 'allow', __rootStartedAt: 'deny', __fallbackDepth: 'deny', __hopBase: 'deny',
   __fallbackWalk: 'deny', router: 'deny', routerParams: 'deny', hostPolicy: 'deny', policyTier: 'deny', onBeforeGeneration: 'deny',
   onAfterGeneration: 'allow', onBeforeToolExecution: 'allow', __approvalGate: 'allow', __strictCredentials: 'deny',
-  __panelDeadline: 'allow', __maskError: 'deny', _responseFormat: 'deny', _responseFormatBuilder: 'deny',
+  __panelDeadline: 'allow', __maskError: 'deny', responseFormat: 'deny', _responseFormat: 'deny', _responseFormatBuilder: 'deny',
   _schemaInstruction: 'deny', _transcriptIncludeTrailingCallerMessages: 'deny', _continuation: 'deny',
   // Added on master after the allow list was written, and allowed: each can stop a seat's call, none moves a seat off its seating.
   budget: 'allow', hookErrors: 'allow', abortSignal: 'allow',
