@@ -53,6 +53,8 @@ import {
   type ForgetMemoryReport,
   type ForgetUserMemoryOptions,
   type PartOutcome,
+  type ReapplyTombstonesOptions,
+  type TombstoneReplayResult,
 } from '../cognition/memory/io/forgetUserMemory.js';
 import type { ForgetReport } from '../cognition/learning/types.js';
 import { openForgottenCopy } from '../cognition/memory/suppression/forgottenCopy.js';
@@ -965,9 +967,10 @@ export type SouledAgent = Agent & {
    * deletes again whatever the store holds of a forgotten user or session. For a restore runbook, and for a schedule
    * when several processes share one store on PostgreSQL.
    *
-   * @returns One report a subject deleted again; none on a store that holds nothing of a forgotten subject.
+   * @returns One report per subject deleted again. If the learning store could not be scanned, the result also carries
+   *   `diagnostics.learningStoreScan`.
    */
-  applyTombstones?(): Promise<ForgetMemoryReport[]>;
+  applyTombstones?(): Promise<TombstoneReplayResult>;
   /**
    * Deletes for good what the agent's `retention` no longer keeps: each subject's traces older than its period, and
    * the pages compiled from them (whole, or rebuilt from the traces that are left with `pages: 'rebuild'`). `close()`
@@ -1691,13 +1694,11 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
   /** The store's own Brain, which the soul's mind files into and reads on the GMI runtime with cognitive memory on. */
   const soulBrain = brainOf(memory);
   /**
-   * The archive the soul's mind keeps the originals of its traces in, on the soul's Brain, as each manager it builds
-   * there does: its tables are made once at the open, so a deletion with no manager open in this process drops a
-   * person's originals without building one, which would need the embedding provider. Undefined with cognitive memory
-   * off.
+   * The archive on the soul's Brain is available for deletion on either runtime. With no manager live, the deletion
+   * drops originals by trace id without building a manager or calling its embedding provider.
    */
-  const mindArchive = mindRecalls ? new SqlStorageMemoryArchive(soulBrain.adapter, soulBrain.features, soulBrain.brainId) : undefined;
-  if (mindArchive) await closingOnThrow(() => mindArchive.initialize());
+  const mindArchive = new SqlStorageMemoryArchive(soulBrain.adapter, soulBrain.features, soulBrain.brainId);
+  await closingOnThrow(() => mindArchive.initialize());
   /** The managers of the soul's mind open in this process: the ones `gmi()` built on {@link soulBrain}, until it shuts each down. */
   const mindManagers = new Set<ICognitiveMemoryManager>();
   /** When `close()` began: the turns and the writes it waits for, the mind's among them, share one deadline from here. */
@@ -2540,6 +2541,7 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
   }
   // A learning layer gmi() builds from these options writes and reads the store's ledger.
   shareForgottenLedger(agentOptions, forgotten);
+  const learningReplay: Pick<ReapplyTombstonesOptions, 'listLearningUsers'> = {};
   if (runtime === 'gmi') {
     // The GMI runtime reads the soul's store by the same options object, cognitive memory on or off: each session
     // turn's view of the memory rules, whether the end user's id goes to the model provider, and the Brain its
@@ -2554,6 +2556,9 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
         attach: (connection) => {
           legacyGmi.connection = connection;
         },
+      },
+      attachLearningUserScan: (listUsers) => {
+        learningReplay.listLearningUsers = listUsers;
       },
       mechanisms: soulMechanismsOf(mind?.mechanisms),
       memoryBuilt: (manager) => {
@@ -2793,26 +2798,17 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
     },
   });
   /**
-   * The mind side of the agent on the GMI runtime, cognitive memory on or off: a deletion empties the open sessions
-   * of its subject through it, and with cognitive memory on deletes the subject's rows through it, with what the
-   * managers open in this process keep of each, or with none open each trace's archived original. It waits for a
-   * session's running turn as long as close() waits for its turns and writes.
+   * Deletes through live managers or through the archive when none is live. On the GMI runtime it also empties
+   * open sessions, waiting for a running turn as long as close() waits for turns and writes.
    */
-  const soulMind =
-    runtime === 'gmi'
-      ? createSoulMind({
-          managers: () => mindManagers,
-          ...(mindArchive
-            ? {
-                archive: {
-                  originals: mindArchive,
-                  traceIdsOf: (scopeId: string) => memory.tracesStoredBefore('conversation', scopeId, Number.MAX_SAFE_INTEGER),
-                },
-              }
-            : {}),
-          deadlineMs: waitMs,
-        })
-      : undefined;
+  const soulMind = createSoulMind({
+    managers: () => mindManagers,
+    archive: {
+      originals: mindArchive,
+      traceIdsOf: (scopeId) => memory.tracesStoredBefore('conversation', scopeId, Number.MAX_SAFE_INTEGER),
+    },
+    deadlineMs: waitMs,
+  });
   /**
    * What a deletion of one subject does to the sessions this handle holds open for the subject, as an entry of the
    * report's stores and as the deletion's `sessions` part. The legacy runtime keeps a session's history in this
@@ -2826,7 +2822,7 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
     const open = sessionsBySubject.get(key) ?? new Set<AgentSession>();
     const store = 'session history in this process';
     const both = (part: PartOutcome) => ({ entry: { store, ...part }, part });
-    if (soulMind) {
+    if (runtime === 'gmi') {
       try {
         const { evicted, running } = await soulMind.evictSessions([...open]);
         if (running === 0) return both({ reached: true, deleted: evicted });
@@ -2850,8 +2846,7 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
   };
   /**
    * The parts of one subject's deletion that are this agent's: the wait for the subject's pending writes, its chain,
-   * what the agent reached beside the store, the open sessions and, with cognitive memory on, the mind the rows are
-   * deleted through.
+   * what the agent reached beside the store, the open sessions, and the mind or archive the rows are deleted through.
    */
   const deletionPartsOf = (
     subject: SuppressionSubject,
@@ -2869,7 +2864,7 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
       sessions: async () => (await historyOf()).part,
       extraStores: async () => [...extra.stores, (await historyOf()).entry],
       alsoIncomplete: extra.incomplete,
-      ...(soulMind && mindRecalls ? { mind: soulMind } : {}),
+      mind: soulMind,
     };
   };
   /**
@@ -3111,10 +3106,9 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
       }));
   }
   /**
-   * Brings the ledger up to date from its copy and deletes again whatever the store holds of a forgotten subject. A
-   * passed GMI store's forgotten users and deleted traces are reached again as well.
+   * Brings the ledger up to date from its copy and retries deletion across the soul, passed GMI and learning stores.
    */
-  const applyTombstones = async (): Promise<ForgetMemoryReport[]> => {
+  const applyTombstones = async (): Promise<TombstoneReplayResult> => {
     /** The subjects deleted again, in the order of their reports. */
     const reapplied: SuppressionSubject[] = [];
     const reports = await reapplyTombstones({
@@ -3124,6 +3118,7 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
       agentId,
       legacyUnattributed,
       ...(legacyGmi.store ? { legacyGmiStore: legacyGmi.store } : {}),
+      ...learningReplay,
       forSubject: async (subject) => {
         reapplied.push(subject);
         return subjectDeletionOf(subject);
@@ -3137,9 +3132,8 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
       changing: (key) => {
         correctionCounts.set(key, (correctionCounts.get(key) ?? 0) + 1);
       },
-      // With cognitive memory on, through the mind first, which takes each trace with what it keeps of it, and out of
-      // the working memory of the person's open sessions.
-      ...(soulMind && mindRecalls ? { mind: soulMind, sessionsOf: (scopeId: string) => sessionsBySubject.get(scopeId) ?? [] } : {}),
+      mind: soulMind,
+      sessionsOf: (scopeId) => sessionsBySubject.get(scopeId) ?? [],
     });
     // A subject the store holds nothing more of no longer counts toward the retention requirement.
     reports.forEach((report, at) => {
@@ -3163,9 +3157,8 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
       retention,
       daysFor: (scopeId) => policyDays.get(scopeId),
       onChain: (scopeId, work) => (closing ? work() : onSubject(scopeId, work)),
-      // With cognitive memory on, the expired traces go through the mind first, with what it keeps of each, and leave
-      // the working memory of their person's open sessions.
-      ...(soulMind && mindRecalls ? { mind: soulMind, sessionsOf: (scopeId: string) => sessionsBySubject.get(scopeId) ?? [] } : {}),
+      mind: soulMind,
+      sessionsOf: (scopeId) => sessionsBySubject.get(scopeId) ?? [],
     });
   };
   built.sweepRetention = () => awaitedOnClose(sweep());
@@ -3214,7 +3207,7 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
         recipients: listRecipients,
         retention: { period: retention?.traces ?? 'none', ...(days !== undefined ? { policyDays: days } : {}) },
         profilingOf: sentimentOf,
-        ...(mindArchive ? { archive: mindArchive } : {}),
+        ...(mindRecalls ? { archive: mindArchive } : {}),
         ...(liveGraph ? { liveGraph } : {}),
         ...(exportLearned ? { learner: () => exportLearned.call(built.learning, userId) } : {}),
         ...(legacyGmi.store ? { legacyGmiStore: legacyGmi.store } : {}),
@@ -3261,11 +3254,8 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
               if (changing) countChange();
             }),
           ),
-        // With cognitive memory on, the named traces go through the mind first, with what it keeps of each, and leave
-        // the working memory of the person's open sessions.
-        ...(soulMind && mindRecalls
-          ? { mind: soulMind, sessions: () => sessionsBySubject.get(conversationScopeKey(agentId, subject)) ?? [] }
-          : {}),
+        mind: soulMind,
+        sessions: () => sessionsBySubject.get(conversationScopeKey(agentId, subject)) ?? [],
       }),
     );
   };

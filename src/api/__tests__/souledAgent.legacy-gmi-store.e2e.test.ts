@@ -601,6 +601,52 @@ describe.each(RUNTIMES)('with %s', (_name, runtime) => {
       }
     });
 
+    it('reports an unavailable or failed learning-store scan and retries it', async () => {
+      const own = await separateLearning();
+      try {
+        const configured = own.learning();
+        const store = configured.store!;
+        await seed({ path: legacyFile }, configured);
+        const [alice] = await store.sessionRowsOf(learning.namespace, ALICE);
+        expect(alice).toBeDefined();
+        const first = await open({ path: legacyFile }, configured);
+        expect((await first.forgetUser!(ALICE)).complete).toBe(true);
+        await close();
+
+        // Restore the session row through the store. The same id in another namespace names a different person.
+        const otherNamespace = 'orchard/elsewhere';
+        await store.putSessionRow(alice);
+        await store.putSessionRow({ ...alice, namespace: otherNamespace });
+        Object.defineProperty(store, 'listUserIds', { configurable: true, value: undefined });
+        events.length = 0;
+        const reopened = await open({ path: legacyFile }, configured);
+        expect(events).toContainEqual(expect.objectContaining({
+          event: 'memory.tombstone_reapplied', learningStoreScan: 'unavailable',
+        }));
+        const unavailable = await reopened.applyTombstones!();
+        expect(unavailable).toHaveLength(0);
+        expect(unavailable.diagnostics).toEqual({ learningStoreScan: 'unavailable' });
+        expect(await store.sessionRowsOf(learning.namespace, ALICE)).toEqual([alice]);
+
+        Reflect.deleteProperty(store, 'listUserIds');
+        vi.spyOn(store, 'listUserIds').mockRejectedValueOnce(new Error('The learning rows could not be read.'));
+        const failed = await reopened.applyTombstones!();
+        expect(failed).toHaveLength(0);
+        expect(failed.diagnostics).toEqual({ learningStoreScan: 'failed' });
+
+        const retried = await reopened.applyTombstones!();
+        expect(retried).toHaveLength(1);
+        expect(retried[0].complete).toBe(true);
+        expect(retried.diagnostics).toBeUndefined();
+        expect(await store.sessionRowsOf(learning.namespace, ALICE)).toEqual([]);
+        expect(await store.sessionRowsOf(otherNamespace, ALICE)).toEqual([{ ...alice, namespace: otherNamespace }]);
+        expect(await reopened.applyTombstones!()).toEqual([]);
+      } finally {
+        await close();
+        await own.close();
+      }
+    });
+
     it('forgets the persona notes the passed store indexes for the person when learning moved to a store of its own', async () => {
       await seed();
       const note = await plantPersonaNote(await legacyCanaryId());

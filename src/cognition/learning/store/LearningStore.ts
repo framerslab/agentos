@@ -210,6 +210,11 @@ export interface LearningStore extends LearningStoreTx {
   /** `sql` for a store over a storage adapter; `memory` for one that ends with the process. */
   readonly kind: 'sql' | 'memory';
   /**
+   * Reads the distinct user ids named by learning rows in one namespace, including the user of a ledger turn.
+   * Optional for custom stores. Tombstone replay reports when this scan is unavailable.
+   */
+  listUserIds?(namespace: string): Promise<readonly string[]>;
+  /**
    * Runs `fn` in one transaction: every write it makes through `tx` commits together, or none does when it throws.
    * `fn` makes every call through `tx`, never through the store: a call on the store runs outside the transaction,
    * and a store that runs one call at a time holds it until the transaction ends, so a transaction that waits for it

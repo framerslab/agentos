@@ -376,6 +376,24 @@ export class InMemoryLearningStore extends TransactionalLearningStore {
     return this.transaction((tx) => tx.agentHasLearners!(namespace, agentKey));
   }
 
+  /** Reads the namespace's named users while holding the store's transaction queue. */
+  listUserIds(namespace: string): Promise<string[]> {
+    return this.transaction(async () => {
+      const { ledger, heads, traits, freezes, sessions, docs } = this.tables;
+      const users = new Set<string>();
+      const userTables = [ledger, heads, traits, freezes, sessions, ...DOC_TABLES.map((table) => docs[table])];
+      for (const table of userTables) {
+        for (const row of table.values()) {
+          if (row.namespace === namespace && row.userId) users.add(row.userId);
+        }
+      }
+      for (const row of ledger.values()) {
+        if (row.namespace === namespace && row.turnUserId) users.add(row.turnUserId);
+      }
+      return [...users];
+    });
+  }
+
   /** Releases nothing: the rows stay with the store until the process ends. */
   async close(): Promise<void> {}
 }

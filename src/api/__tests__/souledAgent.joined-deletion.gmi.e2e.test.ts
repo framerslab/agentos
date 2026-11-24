@@ -693,6 +693,21 @@ it.each(['gmi', 'legacy'] as const)(
     expect.soft((await reopenedArchive.list()).map(({ traceId }) => traceId)).toEqual([hisWrite.traceId]);
     expect.soft(await reopenedArchive.lastAccessedAt(herWrite.traceId)).toBeNull();
     expect(await reopenedArchive.lastAccessedAt(hisWrite.traceId)).toBe(bobAccess);
+
+    await reopenedBrain.exec(`CREATE TRIGGER hold_archive BEFORE DELETE ON archived_traces
+      BEGIN SELECT RAISE(ABORT, 'the archive is unavailable'); END`);
+    const interrupted = await reopened.forgetUser!('bob');
+    expect(interrupted.complete).toBe(false);
+    expect(interrupted.parts[1]).toMatchObject({ part: 'mind', reached: false });
+    expect((await rowsUnder(reopenedBrain, keyOf('bob'))).map(({ id }) => id)).toContain(hisWrite.traceId);
+    expect(await reopenedArchive.lastAccessedAt(hisWrite.traceId)).toBe(bobAccess);
+
+    await reopenedBrain.exec('DROP TRIGGER hold_archive');
+    const [retried] = await reopened.applyTombstones!();
+    expect(retried.complete).toBe(true);
+    expect(await rowsUnder(reopenedBrain, keyOf('bob'))).toEqual([]);
+    expect(await reopenedArchive.list()).toEqual([]);
+    expect(await reopenedArchive.lastAccessedAt(hisWrite.traceId)).toBeNull();
     expect(embeddings.embedded).toHaveLength(beforeEmbedding);
     expect(served.seen).toHaveLength(beforeModel);
   },

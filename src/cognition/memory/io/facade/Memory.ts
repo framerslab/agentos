@@ -85,7 +85,7 @@ import { fillScopeIds } from '../../retrieval/store/migrations/v2-to-v3.js';
 import { ForgottenLedger, type SuppressionSubject } from '../../suppression/ForgottenLedger.js';
 import { CONVERSATION_SCOPE, parseConversationScopeKey } from '../../retrieval/store/conversationScopeKey.js';
 import { notFiledByMindCondition } from '../../retrieval/store/mindFiled.js';
-import { isMissingTableError } from '../../retrieval/store/missingTable.js';
+import { listSqlLearningUserIds } from '../../../learning/store/SqlLearningStore.js';
 import { ensureScopeRow, registerUnregisteredConversationScopes } from '../../retrieval/store/conversationScopes.js';
 import { memoryLog } from '../../log.js';
 import { errorFields } from '../../../../core/logging/events.js';
@@ -265,22 +265,6 @@ const REPLACE_READ_PAGE_ROW = `UPDATE memory_pages
 /** How many times a page write reads the row again when another writer changed it between the read and the write. */
 const PAGE_WRITE_ATTEMPTS = 5;
 
-/**
- * Each learning-store column that names a user, by table: the learner of a session, chain head, ledger row, trait row,
- * freeze or document row, and the turn's user a ledger row records.
- */
-const LEARNER_USER_COLUMNS: ReadonlyArray<readonly [string, string]> = [
-  ['agentos_learning_sessions', 'user_id'],
-  ['agentos_learning_heads', 'user_id'],
-  ['agentos_learning_ledger', 'user_id'],
-  ['agentos_learning_ledger', 'turn_user_id'],
-  ['agentos_learning_traits', 'user_id'],
-  ['agentos_learning_freezes', 'user_id'],
-  ['agentos_learning_outcomes', 'user_id'],
-  ['agentos_learning_lessons', 'user_id'],
-  ['agentos_learning_skills', 'user_id'],
-];
-
 /** Reads named users without decoding scope ids. By default, reads both trace metadata and learning tables. @internal */
 export async function listNamedMemoryUsers(
   brain: Brain,
@@ -288,29 +272,17 @@ export async function listNamedMemoryUsers(
   options?: { onlyLearningTables?: boolean },
 ): Promise<string[]> {
   const users = new Set<string>();
-  const holdUser = (userId: unknown): void => {
-    if (typeof userId === 'number') users.add(String(userId));
-    else if (typeof userId === 'string' && userId !== '') users.add(userId);
-  };
   if (!options?.onlyLearningTables) {
     const named = await brain.all<{ user_id: unknown }>(
       `SELECT DISTINCT ${brain.features.dialect.jsonExtract('metadata', '$.turnUserId')} AS user_id FROM memory_traces WHERE brain_id = ?`,
       [brain.brainId],
     );
-    for (const row of named) holdUser(row.user_id);
-  }
-  for (const [table, column] of LEARNER_USER_COLUMNS) {
-    try {
-      const rows = await brain.all<{ user_id: unknown }>(
-        `SELECT DISTINCT ${column} AS user_id FROM ${table} WHERE ${column} IS NOT NULL${namespace === undefined ? '' : ' AND namespace = ?'}`,
-        namespace === undefined ? [] : [namespace],
-      );
-      for (const row of rows) holdUser(row.user_id);
-    } catch (error) {
-      // A store whose database holds no learning tables has no learner to name.
-      if (!isMissingTableError(error)) throw error;
+    for (const { user_id: id } of named) {
+      if (typeof id === 'number') users.add(String(id));
+      else if (typeof id === 'string' && id !== '') users.add(id);
     }
   }
+  for (const id of await listSqlLearningUserIds(brain, namespace)) users.add(id);
   return [...users];
 }
 

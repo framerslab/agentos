@@ -47,9 +47,9 @@ export interface ForgetMemoryReport {
    * call deletes from failed (the full-text index, the vector index and the write-ahead log included), a page failed,
    * the store holds memory from before per-user scope that nobody attributed, or open sessions kept what they hold of
    * the subject. The stores the call never reaches by design are named and do not count. The same call made again
-   * resumes an incomplete deletion. So does the next open, or the next re-application of the tombstones, for what the
-   * store still holds of the subject; they reach a passed GMI store's part only where that store's own learning tables,
-   * or a trace's `turnUserId`, name the person.
+   * resumes an incomplete deletion. The next open or tombstone replay retries when the soul store names the subject,
+   * the passed GMI store names the user in its learning tables or a trace's `turnUserId`, or the active learning store
+   * names the user in its namespace. Replay also deletes traces that are present again by their recorded trace ids.
    */
   complete: boolean;
   /** When the deletion ended, as an ISO 8601 time in UTC. */
@@ -668,6 +668,8 @@ export interface ReapplyTombstonesOptions
   >;
   /** A passed GMI store whose forgotten users and marked traces are reached again. @internal */
   legacyGmiStore?: LegacyGmiStore;
+  /** Reads named users in the active learning store. Returns undefined if it cannot enumerate users. @internal */
+  listLearningUsers?: () => Promise<readonly string[] | undefined>;
   /**
    * Runs the work on one conversation key in that subject's turn, after its writes and compiles: the deleted traces a
    * restore brought back under the key, and the corrections filed again under it. Unset: at once.
@@ -681,10 +683,8 @@ export interface ReapplyTombstonesOptions
   /** The clock, in Unix ms. Default `Date.now`. */
   now?: () => number;
   /**
-   * The mind of a souled agent on `runtime: 'gmi'` with cognitive memory on: each trace the ledger records as deleted
-   * that the store holds again is deleted through it before the store's own delete, with what the mind keeps of it,
-   * and the traces deleted under a conversation key leave the working memory of that key's open sessions
-   * (`sessionsOf`).
+   * The mind or archive of a souled agent. Each trace the ledger records as deleted goes through it before the
+   * store's own delete, and leaves the working memory of any sessions open for that key (`sessionsOf`).
    *
    * @internal
    */
@@ -698,6 +698,12 @@ export interface ReapplyTombstonesOptions
    */
   changing?: (scopeId: string) => void;
 }
+
+/** Per-subject replay reports, with optional diagnostics for a learning store scan that could not finish. */
+export type TombstoneReplayResult = ForgetMemoryReport[] & {
+  /** A scan is unavailable when the store has no enumeration, and failed when the store could not be opened or read. */
+  diagnostics?: { learningStoreScan: 'unavailable' | 'failed' };
+};
 
 /** What the re-application did with the traces the ledger records as deleted. */
 interface DeletedTracesReapplied {
@@ -938,8 +944,8 @@ async function refileKeptCorrections(
 
 /**
  * Brings the store's ledger up to date from its copy, then runs the deletion again, with no second tombstone, for
- * every forgotten subject the store still holds: after a restore from a backup taken before a deletion, after a
- * deletion that did not finish, and for what another process wrote after a tombstone. It deletes nothing of a subject
+ * every forgotten subject the soul, passed GMI or learning store still holds. This covers restores from before a
+ * deletion, interrupted deletions, and writes from another process after a tombstone. It deletes nothing of a subject
  * the ledger does not hold, and never touches memory from before per-user scope that nobody attributed.
  *
  * Then each trace the ledger records as deleted by a correction or a single deletion, which the store holds again, is
@@ -952,31 +958,46 @@ async function refileKeptCorrections(
  * there writes one `memory.erasure_unfinished` line and stays owed.
  *
  * One `memory.tombstone_reapplied` line is logged when a subject was re-applied, a tombstone came back from the copy,
- * a recorded trace was deleted again or could not be, or a kept correction was filed again or could not be.
+ * a recorded trace or kept correction needed a retry, or the learning store scan could not finish.
  *
- * @returns One report a subject re-applied; none for a store that holds nothing of a forgotten subject.
+ * @returns One report per subject re-applied, with replay diagnostics if the learning store could not be scanned.
  * @throws Error when the store has no forgotten-user ledger.
  * @throws What the ledger throws when its copy cannot be read: nothing is deleted.
  */
-export async function reapplyTombstones(options: ReapplyTombstonesOptions): Promise<ForgetMemoryReport[]> {
-  const { memory, agentId, forSubject, legacyGmiStore } = options;
+export async function reapplyTombstones(options: ReapplyTombstonesOptions): Promise<TombstoneReplayResult> {
+  const { memory, agentId, forSubject, legacyGmiStore, listLearningUsers } = options;
   const ledger = options.ledger ?? memory.forgotten;
   if (!ledger) throw new Error('reapplyTombstones: the store has no forgotten-user ledger');
   const { added } = await ledger.reconcile();
-  const reports: ForgetMemoryReport[] = [];
+  const reports: TombstoneReplayResult = [];
   let legacyFailures = 0;
   // A store that has forgotten nobody holds nothing to delete again, and its rows are not listed.
   if ((await ledger.size()) > 0) {
     const held = await memory.listHeldSubjects();
+    const users = new Set(held.filter(({ kind }) => kind === 'user').map(({ id }) => id));
+    const addUsers = (ids: readonly string[]): void => {
+      for (const id of ids) {
+        if (users.has(id)) continue;
+        users.add(id);
+        held.push({ kind: 'user', id });
+      }
+    };
     if (legacyGmiStore) {
-      const soulUsers = new Set(held.filter(({ kind }) => kind === 'user').map(({ id }) => id));
       try {
-        for (const id of await listNamedMemoryUsers(legacyGmiStore.brain, legacyGmiStore.namespace)) {
-          if (!soulUsers.has(id)) held.push({ kind: 'user', id });
-        }
+        addUsers(await listNamedMemoryUsers(legacyGmiStore.brain, legacyGmiStore.namespace));
       } catch (error) {
         memoryLog.warn('memory.erasure_unfinished', errorFields(error));
         legacyFailures += 1;
+      }
+    }
+    if (listLearningUsers) {
+      try {
+        const ids = await listLearningUsers();
+        if (ids === undefined) reports.diagnostics = { learningStoreScan: 'unavailable' };
+        else addUsers(ids);
+      } catch (error) {
+        reports.diagnostics = { learningStoreScan: 'failed' };
+        memoryLog.warn('memory.erasure_unfinished', { store: 'learning store', ...errorFields(error) });
       }
     }
     for (const subject of held) {
@@ -1025,7 +1046,7 @@ export async function reapplyTombstones(options: ReapplyTombstonesOptions): Prom
     }
   }
   if (reports.length > 0 || added.length > 0 || traces.traces > 0 || traces.missed > 0 ||
-      corrections.refiled > 0 || corrections.missed > 0 || legacyFailures > 0) {
+      corrections.refiled > 0 || corrections.missed > 0 || legacyFailures > 0 || reports.diagnostics) {
     memoryLog.info('memory.tombstone_reapplied', {
       subjects: reports.length,
       reconciled: added.length,
@@ -1034,6 +1055,7 @@ export async function reapplyTombstones(options: ReapplyTombstonesOptions): Prom
       correctionsRefiled: corrections.refiled,
       correctionsMissed: corrections.missed,
       ...(legacyGmiStore ? { legacyFailures } : {}),
+      ...reports.diagnostics,
     });
   }
   return reports;
