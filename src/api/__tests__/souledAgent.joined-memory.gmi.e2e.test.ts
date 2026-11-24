@@ -14,8 +14,9 @@
  *   of the mind's index, and a load counts them in one line.
  * - Two sessions of one person sending at once file four rows, each turn's record naming its own two.
  * - A turn that fails, or that `session.close()` or the caller's signal stops, files neither side, and the next turn
- *   files as usual; so does a structured send whose answer does not parse, which the session refuses once its GMI has
- *   ended the turn. An id no memory key can be built from files nothing.
+ *   files as usual; so does a structured send whose answer does not parse, which the session refuses before its GMI
+ *   commits the turn. A structured send repaired inside its turn files the question and the accepted answer once. An
+ *   id no memory key can be built from files nothing.
  * - `close()` waits for the mind's writes before the mind's memory shuts down, and the soul's store is closed once.
  * - A memory that does not build fails the turn, and the next turn builds it again.
  *
@@ -567,7 +568,7 @@ describe.each(RUNTIMES)('with %s', (_name, runtime) => {
     it('a structured send whose answer does not parse files neither side, and the next turn files as usual', async () => {
       const a = await open({}, [reply.text('Lyon'), reply.text('Tea, noted.'), ...spare()]);
       const session = a.session('s1', { userId: 'alice' });
-      // Not JSON: the session refuses the reply after its GMI has ended the turn, and keeps nothing of the exchange.
+      // Not JSON: the session refuses the reply before its GMI commits the turn, and keeps nothing of the exchange.
       await expect(session.send('Where does my canary LARK-7 live?', { responseSchema: z.object({ city: z.string() }) })).rejects.toBeInstanceOf(ObjectGenerationError);
       expect(session.messages()).toEqual([]);
 
@@ -578,6 +579,27 @@ describe.each(RUNTIMES)('with %s', (_name, runtime) => {
       expect(rows.map((row) => metaOf(row).filedBy)).toEqual(['mind', 'mind']);
       expect(writtenIds(record)).toEqual(rows.map((row) => row.id));
       // The refused reply was never sent to the embedding provider for a filing.
+      expect(embeddings.embedded).not.toContain('Lyon');
+    });
+
+    it('a structured send repaired inside its turn files the question and the accepted answer once', async () => {
+      const a = await open({}, [reply.text('Lyon'), reply.text('{"city":"Lyon"}'), ...spare()]);
+      const session = a.session('s1', { userId: 'alice' });
+      const question = 'Where does my canary LARK-7 live?';
+      // The first answer is not JSON: its repair is a further step of the same turn, which commits on the accepted answer.
+      const result = await session.send(question, { responseSchema: z.object({ city: z.string() }), maxValidationRetries: 1 });
+
+      expect(result.object).toEqual({ city: 'Lyon' });
+      expect(session.messages()).toEqual([
+        { role: 'user', content: question },
+        { role: 'assistant', content: '{"city":"Lyon"}' },
+      ]);
+      const record = await writeOf(result);
+      const rows = await rowsUnder(storeBrain(a), keyOf('alice'));
+      expect(rows.map((row) => row.content)).toEqual([question, '{"city":"Lyon"}']);
+      expect(rows.map((row) => metaOf(row).filedBy)).toEqual(['mind', 'mind']);
+      expect(writtenIds(record)).toEqual(rows.map((row) => row.id));
+      // The rejected first answer was never sent to the embedding provider for a filing.
       expect(embeddings.embedded).not.toContain('Lyon');
     });
 
