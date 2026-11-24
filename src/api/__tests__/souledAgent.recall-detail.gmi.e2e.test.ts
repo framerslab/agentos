@@ -128,8 +128,10 @@ function editMindRecall(message: Message, edit: (text: string) => string): Messa
 }
 
 function blocksOfLastCall(of: ProviderScript = served) {
-  const parts = of.seen.at(-1)!.messages.flatMap(({ content }) =>
-    typeof content === 'string' ? [content] : Array.isArray(content) ? content.flatMap((part) => ('text' in part ? [part.text] : [])) : [],
+  const parts: string[] = of.seen.at(-1)!.messages.flatMap(({ content }) =>
+    typeof content === 'string' ? [content] : Array.isArray(content)
+      ? content.flatMap((part) => 'text' in part && typeof part.text === 'string' ? [part.text] : [])
+      : [],
   );
   const provider = parts.find((part) => part?.startsWith('<memory_recall>')) ?? '';
   const mind = parts.find((part) => part?.includes('## How To Use Your Memories')) ?? '';
