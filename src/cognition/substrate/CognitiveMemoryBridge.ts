@@ -529,7 +529,7 @@ export class CognitiveMemoryBridge {
         { scopes, ...(skipReconsolidation ? { skipReconsolidation: true } : {}) },
       );
       // Changed in place: the manager renders this context again for a model hop by the object it returned.
-      context.contextText = this.withUserTagHidden(context.contextText);
+      this.hideUserTag(context);
       if (context.contextText.trim()) {
         // Counts, the retrieval, the reranker and the absent legs; the ids only on the host's ask, the text never.
         // With the capture off, the counts come from the assembler's line report, one entry a trace.
@@ -558,11 +558,18 @@ export class CognitiveMemoryBridge {
     }
   }
 
-  /** A memory block as the turn may show it: with no tag that names the user, on a turn that sends the model no user id. */
-  private withUserTagHidden(text: string): string {
-    if (!this.withholdsUserId()) return text;
+  /** Hide the user's tag from both the delivered block and its recorded entry formatting. */
+  private hideUserTag(context: AssembledMemoryContext): void {
+    if (!this.withholdsUserId()) return;
     const userId = this.getUserContext()?.userId;
-    return typeof userId === 'string' && userId.trim() ? withoutShownTag(text, userId) : text;
+    if (typeof userId !== 'string' || !userId.trim()) return;
+    context.contextText = withoutShownTag(context.contextText, userId);
+    if (context.renderedRecallSections) {
+      context.renderedRecallSections = context.renderedRecallSections.map(({ header, entries }) => ({
+        header,
+        entries: entries.map((entry) => ({ ...entry, text: withoutShownTag(entry.text, userId) })),
+      }));
+    }
   }
 
   /** The configured budget of the memory block: the manager's `recall.budget.totalTokens`, 1600 when unset. */
@@ -617,7 +624,9 @@ export class CognitiveMemoryBridge {
           ...(turn.skipReconsolidation ? { skipReconsolidation: true } : {}),
         });
       }
-      return stamped({ ...next, contextText: this.withUserTagHidden(next.contextText) }, true);
+      const shown = stamped(next, true);
+      this.hideUserTag(shown);
+      return shown;
     } catch (error: unknown) {
       this.addTraceEntry('WARNING', 'Cognitive memory re-render for a model hop failed.', { errorName: errorNameOf(error) });
       return null;

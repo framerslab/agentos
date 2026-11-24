@@ -384,6 +384,8 @@ export interface GMITurnInput {
      * their own session id, which is no user's. A learning layer reads such a turn's user as `null`.
      */
     noTurnUser?: boolean;
+    /** Called at the GMI's commit point, before after-turn work starts. @internal */
+    onTurnCommitted?: () => void;
     /**
      * A souled agent's view of its memory rules for this turn (`souledAgent()` on the GMI runtime): the GMI asks for the
      * turn's answer once, before it scores the user's message for sentiment, and skips the analysis when the answer

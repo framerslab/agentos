@@ -210,6 +210,8 @@ export interface MemoryAssemblerInput {
   graphContext?: (string | MemoryGraphAssociation)[];
   /** Observation notes (Batch 2). */
   observationNotes?: string[];
+  /** Keep the rendered recall entries for the turn's opt-in receipt. @internal */
+  captureRecallEntries?: boolean;
   /** Persistent markdown memory (MEMORY.md contents). */
   persistentMemoryText?: string;
 
@@ -269,6 +271,12 @@ const RECALL_HEADER = "## Relevant Memories (facts and past events, most relevan
 const PERSISTENT_TRUNCATED_MARKER = '\n<!-- truncated -->';
 const INVOLUNTARY_HEADER = '## Something This Reminds Me Of';
 const INVOLUNTARY_PREFIX = '[spontaneous memory] ';
+const MEMORY_BLOCK_HEADERS = new Set([
+  ...Object.values(HEADERS).map((header) => header.trimEnd()),
+  RECALL_HEADER,
+  INVOLUNTARY_HEADER,
+  '## How To Use Your Memories',
+]);
 
 /**
  * Sections are joined with a blank line; each section is charged for the two
@@ -365,6 +373,94 @@ function lineTokens(chars: number): number {
 function sectionText(section: Section): string {
   const lines = section.shown.flatMap((line) => (line ? [line.text] : []));
   return lines.length === 0 ? '' : `${section.header}\n${lines.join('\n')}`;
+}
+
+/**
+ * Finds the original trace IDs with an unambiguous, unchanged entry in the sent memory sections.
+ *
+ * A block that reaches the model whole, on lines of its own, shows every entry it rendered, two identical entries
+ * included. The rest of the text is read line by line: under a memory section's header, a complete rendered entry of
+ * that section is matched first, longest first, so a rule or a heading inside a multiline entry is never read as the
+ * end of its section. Read that way, an entry counts when it is its section's only rendering of that text and the text
+ * was sent once.
+ *
+ * @internal
+ */
+export function shownRecallTraceIds(context: AssembledMemoryContext, textParts: readonly string[]): Set<string> {
+  const block = context.contextText.trim();
+  const rendered = context.renderedRecallSections;
+  // Managers with a custom assembler can still report IDs when their entire block survives.
+  if (!rendered) {
+    return block && textParts.some((text) => text.includes(block))
+      ? new Set(context.shownTexts?.map(({ id }) => id))
+      : new Set();
+  }
+
+  // The block sent whole, wherever it sits: the application note's opening line and the person's words, or other
+  // retrieved context after a horizontal rule, can stand around it.
+  let intactBlocks = 0;
+  const rest = textParts.map((text) => {
+    if (!block) return text;
+    let kept = '';
+    let from = 0;
+    let at = text.indexOf(block);
+    while (at >= 0) {
+      const end = at + block.length;
+      if ((at === 0 || text[at - 1] === '\n') && (end === text.length || text[end] === '\n')) {
+        intactBlocks += 1;
+        kept += `${text.slice(from, at)}\n`;
+        from = end;
+        at = text.indexOf(block, end);
+      } else {
+        at = text.indexOf(block, at + 1);
+      }
+    }
+    return kept + text.slice(from);
+  });
+
+  const entryTexts = new Map(rendered.map(({ header, entries }) => [
+    header,
+    [...new Set(entries.map(({ text }) => text).filter(Boolean))].sort((a, b) => b.length - a.length),
+  ]));
+  const sent = new Map<string, Map<string, number>>();
+  for (const text of rest) {
+    let header: string | undefined;
+    for (let start = 0; start < text.length;) {
+      const texts = header === undefined ? undefined : entryTexts.get(header);
+      const entry = texts?.find((candidate) =>
+        text.startsWith(candidate, start) && (start + candidate.length === text.length || text[start + candidate.length] === '\n'),
+      );
+      if (entry !== undefined) {
+        const counts = sent.get(header!) ?? new Map<string, number>();
+        counts.set(entry, (counts.get(entry) ?? 0) + 1);
+        sent.set(header!, counts);
+        start += entry.length + 1;
+        continue;
+      }
+      const newline = text.indexOf('\n', start);
+      const end = newline < 0 ? text.length : newline;
+      const line = text.slice(start, end);
+      if (MEMORY_BLOCK_HEADERS.has(line)) header = line;
+      // The application note can carry retrieved context after the memory block, separated by a horizontal rule.
+      else if (line === '---' && start >= 2 && text.startsWith('\n\n', start - 2) && text.startsWith('\n\n', end)) header = undefined;
+      start = end + 1;
+    }
+  }
+
+  const shown = new Set<string>();
+  for (const { header, entries } of rendered) {
+    const originals = new Map<string, number>();
+    for (const { text } of entries) originals.set(text, (originals.get(text) ?? 0) + 1);
+    const counts = sent.get(header);
+    for (const { id, text } of entries) {
+      if (id === undefined) continue;
+      // Outside the whole block: a copy a hook added, or the entry itself when the block was changed.
+      const copies = counts?.get(text) ?? 0;
+      const unambiguous = intactBlocks === 1 ? copies === 0 : intactBlocks === 0 && originals.get(text) === 1 && copies === 1;
+      if (unambiguous) shown.add(id);
+    }
+  }
+  return shown;
 }
 
 /**
@@ -760,6 +856,20 @@ function assemble(input: MemoryAssemblerInput, secondPass: boolean): AssembledMe
     includedIds.push(involuntary.id);
   }
 
+  const renderedRecallSections: AssembledMemoryContext['renderedRecallSections'] = input.captureRecallEntries
+    ? MEMORY_LINE_SECTIONS.flatMap((key) => {
+        const { header, shown, candidates } = sections[key];
+        const entries = shown.flatMap((line, index) => line ? [{ id: candidates[index].id, text: line.text }] : []);
+        return entries.length > 0 ? [{ header, entries }] : [];
+      })
+    : undefined;
+  if (renderedRecallSections && involuntary) {
+    renderedRecallSections.push({
+      header: INVOLUNTARY_HEADER,
+      entries: [{ id: involuntary.id, text: involuntary.text.slice(INVOLUNTARY_HEADER.length + 1) }],
+    });
+  }
+
   // --- What became of each line that shows a memory ---
   // One entry a trace, in the block's order: under the section that shows it, else under the first section that had
   // a line for it. A trace shown through its association, or a trace an association was left out for, is not
@@ -810,5 +920,6 @@ function assemble(input: MemoryAssemblerInput, secondPass: boolean): AssembledMe
     allocation: pooled ? { ...effective, recall: effective.semanticRecall, semanticRecall: 0, recentEpisodic: 0 } : effective,
     includedMemoryIds: includedIds,
     lineOutcomes,
+    ...(renderedRecallSections ? { renderedRecallSections } : {}),
   };
 }

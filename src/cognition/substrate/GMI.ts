@@ -60,6 +60,7 @@ import type { CompletionAttempt, CompletionOutcome, CompletionResolution, Comple
 import { checkStructuredReply, resolveStructuredReply, STRUCTURED_REPLY_REFUSED_ISSUE, structuredRepairMessage, StructuredReplyConfigError, type StructuredReplyOutput } from '../../api/runtime/structuredReply.js';
 import type { AgencyLaunchFrame } from '../../api/runtime/agencyLaunch/types';
 import { hostApplicationNote } from '../../api/runtime/applicationNote.js';
+import { recallTextParts } from '../../api/runtime/memoryDataBlock.js';
 
 import { AIModelProviderManager } from '../../core/llm/providers/AIModelProviderManager';
 import { IUtilityAI, SummarizationOptions } from '../nlp/ai_utilities/IUtilityAI';
@@ -71,6 +72,7 @@ import { ConversationMessage, MessageRole } from '../../core/conversation/Conver
 import { GMIError, GMIErrorCode, createGMIErrorFromError } from '../../core/utils/errors.js';
 import type { ICognitiveMemoryManager } from '../memory/CognitiveMemoryManager.js';
 import type { AssembledMemoryContext } from '../memory/core/types.js';
+import { shownRecallTraceIds } from '../memory/core/prompt/MemoryPromptAssembler.js';
 import type { MemoryShownItem } from '../../api/runtime/memoryWriteRecord.js';
 import type { MemoryRecallCapture } from '../memory/retrieval/recall/capture.js';
 import { effectiveRecallBudget, estimateMemoryTokens } from '../memory/retrieval/recall/budget.js';
@@ -448,7 +450,7 @@ export class GMI implements IGMI {
    * stops each one and a promise that resolves once its work is done.
    * shutdown() stops them and waits for them.
    */
-  private readonly runningTurns = new Map<number, { stop: AbortController; ended: Promise<void> }>();
+  private readonly runningTurns = new Map<number, { requestStop: () => void; ended: Promise<void> }>();
 
   /** The shutdown that is running, if any; a shutdown() call made meanwhile waits for it. */
   private shutdownInProgress: Promise<void> | undefined;
@@ -1793,17 +1795,18 @@ export class GMI implements IGMI {
     // The history the turn's requests left out: the report of the serving request that left the most messages out.
     let turnHistoryOmitted: PromptHistoryOmission | undefined;
 
-    // The turn's stop. The caller's abort signal (a session's close()) and this
-    // GMI's shutdown() both abort it; the model call in progress then ends with
-    // the provider's abort chunk (the gateway's, on a turn through a gateway).
+    // A caller's abort, session close or GMI shutdown can stop the turn until it commits.
     const callerSignal = asAbortSignal(turnInput.metadata?.options?.abortSignal);
     const stop = new AbortController();
-    const forwardAbort = (): void => stop.abort();
+    let committed = false;
+    const requestStop = (): void => {
+      if (!committed) stop.abort();
+    };
     if (callerSignal?.aborted) stop.abort();
-    else callerSignal?.addEventListener('abort', forwardAbort, { once: true });
+    else callerSignal?.addEventListener('abort', requestStop, { once: true });
     let endTurn!: () => void;
     this.runningTurns.set(turnNumber, {
-      stop,
+      requestStop,
       ended: new Promise<void>((resolve) => {
         endTurn = resolve;
       }),
@@ -1824,14 +1827,14 @@ export class GMI implements IGMI {
     const settleSentiment = async (postTurn: boolean): Promise<void> => {
       if (!sentimentWork || sentimentDone() || sentimentAbandoned) return;
       const remaining = Math.max(0, SENTIMENT_SETTLE_BUDGET_MS - (Date.now() - sentimentStartedAt));
-      // An abort or a shutdown during either wait ends it at once.
-      if (remaining > 0 && !stop.signal.aborted) await settlesWithin(sentimentWork, remaining, stop.signal);
-      if (postTurn && !sentimentDone() && sentimentCommitted && !stop.signal.aborted) {
+      const signal = postTurn ? undefined : stop.signal;
+      if (remaining > 0 && !signal?.aborted) await settlesWithin(sentimentWork, remaining, signal);
+      if (postTurn && !sentimentDone() && sentimentCommitted) {
         // The reply came in time and its writes have begun: finish them (store writes and event detection, no model
         // call), at most the shutdown bound, so the check consumes the turn's own events and nothing is half written.
         // A history write that outlasts the bound lands after the drop below, and the tracker takes it back.
         const bound = shutdownTimeoutOrDefault(this.config?.shutdownTimeoutMs);
-        if (await settlesWithin(sentimentWork, bound, stop.signal)) return;
+        if (await settlesWithin(sentimentWork, bound)) return;
       }
       if (postTurn && !sentimentDone()) {
         sentimentAbandoned = true;
@@ -1935,7 +1938,7 @@ export class GMI implements IGMI {
           let markApplied: () => void = () => {};
           const applied = new Promise<void>((resolve) => { markApplied = resolve; });
           const analysis = this.sentimentTracker.analyzeTurnSentiment(
-            turnId, userInputText, () => !sentimentAbandoned && !stop.signal.aborted && ownsState(),
+            turnId, userInputText, () => !sentimentAbandoned && (committed || !stop.signal.aborted) && ownsState(),
             () => { sentimentCommitted = true; },
             () => { sentimentApplied = true; markApplied(); },
           ).finally(() => { sentimentSettled = true; });
@@ -2553,17 +2556,13 @@ export class GMI implements IGMI {
           if (assembledMemoryContext?.shownTexts) {
             // A fallback can re-render the block or leave it out. A host hook can also remove it.
             turnMemoryShown = undefined;
-            const block = hopMemoryText?.trim();
-            if (hopCapture && block && sendMessages.some(({ content }) =>
-              typeof content === 'string'
-                ? content.includes(block)
-                : Array.isArray(content) && content.some((part) => 'text' in part && typeof part.text === 'string' && part.text.includes(block)),
-            )) {
-              const texts = new Map(hopMemoryContext?.shownTexts?.map((entry) => [entry.id, entry]));
+            if (hopCapture && hopMemoryContext?.shownTexts) {
+              const sent = shownRecallTraceIds(hopMemoryContext, recallTextParts(sendMessages));
+              const texts = new Map(hopMemoryContext.shownTexts.map((entry) => [entry.id, entry]));
               const shown: MemoryShownItem[] = [];
               for (const { id, outcome } of hopCapture.candidates) {
                 const entry = texts.get(id);
-                if (outcome !== 'included' || !entry) continue;
+                if (outcome !== 'included' || !entry || !sent.has(id)) continue;
                 const date = new Date(entry.createdAt);
                 shown.push({
                   source: 'memory',
@@ -2966,25 +2965,18 @@ export class GMI implements IGMI {
             yield this.createOutputChunk(turnInput.interactionId, GMIOutputChunkType.TOOL_RESULT, toolResultPayload);
           }
           if (toolRoundFailure) throw toolRoundFailure.error;
-          // A turn that stopped during this round ends as a stopped turn: its next model call ends with the stop's
-          // abort. When this round is the turn's last step no model call follows, so the round ends it with that error.
-          if (stop.signal.aborted && safetyBreak >= maxToolLoopIterations) {
-            throw new GMIError(
-              "Turn aborted: it was stopped during its last step's tool calls.",
-              GMIErrorCode.LLM_PROVIDER_ERROR,
-              { turnId },
-            );
-          }
           if (ownsState()) this.state = GMIPrimeState.PROCESSING;
           continue main_processing_loop;
         }
         break main_processing_loop; // Break if no tool calls
       }
 
-      // The last step can yield to a hook that stops the turn. A souled agent's view already gates its own filing.
-      if (stop.signal.aborted && this.memoryBridge && !this.memoryBridge.usesSoul(turnSoul)) {
-        throw new GMIError('Turn aborted before filing in cognitive memory.', GMIErrorCode.LLM_PROVIDER_ERROR, { turnId });
+      // Commit before the first after-turn operation, including on a GMI without cognitive memory.
+      if (stop.signal.aborted) {
+        throw new GMIError('Turn aborted before it committed.', GMIErrorCode.LLM_PROVIDER_ERROR, { turnId });
       }
+      committed = true;
+      turnInput.metadata?.onTurnCommitted?.();
       // The exchange is filed under the turn's memory scope session, when it named one, and, with a learning layer's
       // scope ids, under the turn's own through its guard. On a souled agent's mind it is filed through the turn's view
       // of the soul, and the turn does not wait for it: the output carries the record of the write.
@@ -3068,7 +3060,7 @@ export class GMI implements IGMI {
       // The turn's work is done: shutdown() stops waiting for it, and the
       // caller's signal no longer reaches it.
       this.runningTurns.delete(turnNumber);
-      callerSignal?.removeEventListener('abort', forwardAbort);
+      callerSignal?.removeEventListener('abort', requestStop);
       endTurn();
       // A newer turn may already own the lifecycle state (this generator was
       // drained after a failure, once the next turn had started), or shutdown()
@@ -3538,9 +3530,8 @@ export class GMI implements IGMI {
   }
 
   /**
-   * Shuts the GMI down. It stops the turns still running (each ends with the
-   * abort error) and waits for them at most `shutdownTimeoutMs`, gives
-   * metaprompt work in flight a bounded window to finish, then closes the
+   * Shuts the GMI down. It stops uncommitted turns, waits for running turns at most `shutdownTimeoutMs`,
+   * gives metaprompt work in flight a bounded window to finish, then closes the
    * cognitive and working memory. It owns the lifecycle state from the start,
    * so a turn that ends later leaves the state SHUTDOWN.
    *
@@ -3570,7 +3561,7 @@ export class GMI implements IGMI {
     this.stateOwnerTurn = 0;
     this.addTraceEntry(ReasoningEntryType.LIFECYCLE, "GMI shutting down.");
     try {
-      // Stop the turns still running, and give them the shutdown bound to end
+      // Stop uncommitted turns, and give running turns the shutdown bound to end
       // before the memories they write to are closed.
       await this.stopRunningTurns();
       // Give metaprompt work still in flight a bounded window to store its
@@ -3596,18 +3587,17 @@ export class GMI implements IGMI {
   }
 
   /**
-   * Aborts every running turn, so its model call ends with the provider's
-   * abort chunk, and waits for the turns to end, at most the shutdown bound
+   * Stops uncommitted turns and waits for running turns to end, at most the shutdown bound
    * (`GMIBaseConfig.shutdownTimeoutMs`). A turn whose consumer stops reading its
    * stream does not end; shutdown goes on without it.
    */
   private async stopRunningTurns(): Promise<void> {
     if (this.runningTurns.size === 0) return;
     const turns = Array.from(this.runningTurns.values());
-    for (const turn of turns) turn.stop.abort();
+    for (const turn of turns) turn.requestStop();
     const bound = shutdownTimeoutOrDefault(this.config?.shutdownTimeoutMs);
     if (await settlesWithin(Promise.all(turns.map((turn) => turn.ended)), bound)) return;
-    const message = `${this.runningTurns.size} stopped turn(s) still running after ${bound} ms; closing the memories anyway.`;
+    const message = `${this.runningTurns.size} turn(s) still running after ${bound} ms; closing the memories anyway.`;
     this.addTraceEntry(ReasoningEntryType.WARNING, message);
     console.warn(`GMI (ID: ${this.gmiId}): ${message}`);
   }

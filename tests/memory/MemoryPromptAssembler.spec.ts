@@ -7,6 +7,7 @@ import { describe, it, expect, vi, afterEach } from 'vitest';
 import {
   assembleMemoryContext,
   assembleMemoryContextFirstPass,
+  shownRecallTraceIds,
   type MemoryAssemblerInput,
 } from '../../src/cognition/memory/core/prompt/MemoryPromptAssembler.js';
 import {
@@ -1626,5 +1627,52 @@ describe('MemoryPromptAssembler', () => {
         ).toEqual([...result.includedMemoryIds].sort());
       }
     });
+  });
+});
+
+describe('shownRecallTraceIds', () => {
+  const now = Date.now();
+  const at = { createdAt: now, updatedAt: now, lastAccessedAt: now };
+  // A rule and a section heading inside a memory are part of its rendered entry.
+  const notes = makeScoredTrace({ id: 'notes', content: 'Feeding notes\n\n---\n\n## Observations\nSeed on Mondays.', ...at });
+  const twin = (id: string) => makeScoredTrace({ id, content: 'The canary sings at dawn.', ...at });
+  const assemble = (retrievedTraces: ScoredMemoryTrace[]) =>
+    assembleMemoryContext({ totalTokenBudget: 4000, traits: {}, retrievedTraces, captureRecallEntries: true });
+  const entryOf = (context: ReturnType<typeof assemble>, id: string) =>
+    context.renderedRecallSections!.flatMap(({ entries }) => entries).find((entry) => entry.id === id)!.text;
+
+  it('lists every entry of a block sent whole, identical entries included, with text before and after it', () => {
+    const context = assemble([twin('twin-a'), twin('twin-b'), notes]);
+    const block = context.contextText.trim();
+    const twinLine = entryOf(context, 'twin-a');
+    expect(entryOf(context, 'twin-b')).toBe(twinLine);
+    expect(block.split('\n').filter((line) => line === twinLine)).toHaveLength(2);
+    expect(block).toContain(entryOf(context, 'notes'));
+    expect(entryOf(context, 'notes')).toContain('\n\n---\n\n## Observations\n');
+
+    // The application note opens the text, and other retrieved context and the person's words follow the block.
+    const sent = `A note from the application.\n\n${block}\n\n---\n\nOther retrieved context.\n\nWhat does the canary do?`;
+    expect([...shownRecallTraceIds(context, [sent])].sort()).toEqual(['notes', 'twin-a', 'twin-b']);
+  });
+
+  it('lists an unchanged multiline entry when another entry is removed', () => {
+    const cage = makeScoredTrace({ id: 'cage', content: 'The cage stands by the window.', ...at });
+    const context = assemble([notes, cage]);
+    const cageLine = entryOf(context, 'cage');
+    const sent = context.contextText.split('\n').filter((line) => line !== cageLine).join('\n');
+    expect(sent).not.toContain(cageLine);
+    expect(sent).toContain(entryOf(context, 'notes'));
+    expect([...shownRecallTraceIds(context, [sent])]).toEqual(['notes']);
+  });
+
+  it('lists neither of two identical entries when the block was changed', () => {
+    const cage = makeScoredTrace({ id: 'cage', content: 'The cage stands by the window.', ...at });
+    const context = assemble([twin('twin-a'), twin('twin-b'), cage]);
+    const twinLine = entryOf(context, 'twin-a');
+    // One of the two lines is removed: which memory reached the model cannot be told.
+    const lines = context.contextText.split('\n');
+    lines.splice(lines.indexOf(twinLine), 1);
+    expect(lines).toContain(twinLine);
+    expect([...shownRecallTraceIds(context, [lines.join('\n')])]).toEqual(['cage']);
   });
 });

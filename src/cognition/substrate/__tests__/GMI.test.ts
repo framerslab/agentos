@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { GMI } from '../GMI';
-import { IGMI, GMIBaseConfig, GMITurnInput, GMIInteractionType, GMIPrimeState, GMIMood, UserContext, TaskContext, GMIOutputChunkType } from '../IGMI';
+import { IGMI, GMIBaseConfig, GMITurnInput, GMIInteractionType, GMIPrimeState, GMIMood, UserContext, TaskContext, GMIOutputChunkType, type StepFinishedChunkPayload } from '../IGMI';
 import { IPersonaDefinition } from '../personas/IPersonaDefinition';
 import { IWorkingMemory } from '../memory/IWorkingMemory';
 import { IPromptEngine } from '../../../core/llm/IPromptEngine';
@@ -526,6 +526,58 @@ describe('GMI turn-summary ingestion with a StatisticalUtilityAI', () => {
     expect(ingest).toHaveBeenCalledTimes(1);
     return (ingest.mock.calls[0][0] as { content: string }).content;
   }
+
+  it.each([false, true])('gates after-turn work without cognitive memory (stopped: %s)', async (stopped) => {
+    vi.clearAllMocks();
+    const turnGmi = new GMI('turn-without-cognitive-memory');
+    const stop = new AbortController();
+    await turnGmi.initialize({
+      ...mockPersona,
+      memoryConfig: {
+        enabled: true,
+        ragConfig: { enabled: true, ingestionTriggers: { onTurnSummary: true } },
+      },
+      metaPrompts: [{
+        id: 'gmi_self_trait_adjustment',
+        description: 'Reflect on the exchange',
+        promptTemplate: 'Reflect: {{evidence}}',
+        trigger: { type: 'turn_interval', intervalTurns: 1 },
+        modelId: 'mock-model',
+      }],
+    }, mockBaseConfig);
+
+    try {
+      const stream = turnGmi.processTurnStream({
+        interactionId: 'turn-commit',
+        userId: 'user-test',
+        type: GMIInteractionType.TEXT,
+        content: userInput,
+        metadata: { options: { abortSignal: stop.signal } },
+      });
+      let stepText: string | undefined;
+      let next = await stream.next();
+      while (!next.done) {
+        if (next.value.type === GMIOutputChunkType.STEP_FINISHED) {
+          stepText = (next.value.content as StepFinishedChunkPayload).text;
+          if (stopped) stop.abort();
+        }
+        next = await stream.next();
+      }
+      expect(stepText).toBeTruthy();
+      expect({
+        ingestions: vi.mocked(mockRetrievalAugmentor.ingestDocuments).mock.calls.length,
+        reflectionChecks: turnGmi.getReasoningTrace().entries.filter(({ type }) => type === 'SELF_REFLECTION_TRIGGERED').length,
+      }).toEqual(stopped ? { ingestions: 0, reflectionChecks: 0 } : { ingestions: 1, reflectionChecks: 1 });
+      if (stopped) {
+        expect(next.value.error).toMatchObject({ message: expect.stringMatching(/abort/i) });
+      } else {
+        expect(next.value.error).toBeUndefined();
+        expect(next.value.responseText).toBe(stepText);
+      }
+    } finally {
+      await turnGmi.shutdown();
+    }
+  });
 
   it("summarizes a turn with the persona's extractive method", async () => {
     // 'short', the length a persona that names none asks for, is the first two sentences of "User: ...\n\nAssistant: ...".

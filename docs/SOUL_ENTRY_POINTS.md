@@ -142,7 +142,7 @@ The video game exclusion reads as follows.
 - **Expect a log line for a front-matter `voice` or `avatar`.** The GMI runtime leaves each out, as the legacy runtime does, and says so in one `soul.field_ignored` line for each.
 - **Remove the `channels`, `voice` and `avatar` options, or set `runtime: 'legacy'`.** The GMI runtime throws at open when one is set, naming the option.
 - **Read `result.parsed` from `generate()` with an agent-level `responseSchema`.** Both runtimes validate the reply and use `controls.maxValidationRetries` to bound repair attempts. The option applies to `generate()` alone: a session validates only a schema passed to its `send()`, and returns that value in `result.object`.
-- **Let a turn finish before `close()`.** `close()` stops the session turns still running. The legacy runtime lets them finish within the close's wait.
+- **Let a turn finish before `close()`.** `close()` stops a session turn that has not committed, which happens after its last model step and tool round; a committed turn finishes its after-turn work. The legacy runtime lets running turns finish within the close's wait.
 - **Keep your keys as they are.** The default needs no embedding model, and no session request sends the end user's id to the model provider unless you set `sendUserIdToProvider: true`.
 
 An agent that sets other `agent()` options meets the GMI runtime's handling of each. [GMIs from agent()](./GMI.md#gmis-from-agent) lists them, the per-call options `generate()` and `stream()` take among them: a call that passes any other throws, naming it.
