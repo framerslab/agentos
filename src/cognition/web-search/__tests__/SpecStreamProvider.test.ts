@@ -68,11 +68,30 @@ describe('SpecStreamProvider', () => {
     const [url, init] = fetchMock.mock.calls[1] as [string, RequestInit];
     expect(url).toBe('https://api.specstream.ai/v1/web-search');
     expect(init.method).toBe('POST');
+    expect(init.signal).toBeInstanceOf(AbortSignal);
     expect(JSON.parse(String(init.body))).toEqual({
       q: 'weather today',
       num: 7,
       passages: true,
     });
+  });
+
+  it('recovers a cooled-down key back to ok on a subsequent 200', async () => {
+    const provider = new SpecStreamProvider('ss-alpha-0001');
+    const pool = (
+      provider as unknown as {
+        keyPool: {
+          markFailed(key: string, kind: 'quota', detail: { retryAfterMs: number; status: number }): void;
+          snapshot(): Array<Record<string, unknown>>;
+        };
+      }
+    ).keyPool;
+    pool.markFailed('ss-alpha-0001', 'quota', { retryAfterMs: 0, status: 429 });
+    expect(pool.snapshot()[0]).toMatchObject({ status: 'cooldown', failures: 1 });
+
+    fetchMock.mockResolvedValueOnce(answer(200, found));
+    await provider.search('weather today');
+    expect(pool.snapshot()[0]).toMatchObject({ status: 'ok', failures: 0 });
   });
 
   it('takes the other key out on 402, then sends nothing once every key is out', async () => {

@@ -11,7 +11,7 @@ export interface WebSearchResult {
   url: string;
   title: string;
   snippet: string;
-  /** Full extracted page content (Firecrawl returns this; others do not). */
+  /** Full extracted page content or passage excerpts (Firecrawl and SpecStream return this; others do not). */
   content?: string;
   /** Provider-specific relevance score. */
   relevanceScore?: number;
@@ -31,7 +31,7 @@ export interface EnrichedSearchResult extends WebSearchResult {
 export interface IWebSearchProvider {
   /** Unique provider identifier (e.g., 'firecrawl', 'tavily'). */
   readonly providerId: string;
-  /** RRF weight multiplier. Firecrawl = 1.5, others = 1.0. */
+  /** RRF weight multiplier. Firecrawl and SpecStream = 1.5, others = 1.0. */
   readonly weight: number;
   /** Execute a search query. Returns raw results from this provider. */
   search(query: string, limit?: number): Promise<WebSearchResult[]>;
