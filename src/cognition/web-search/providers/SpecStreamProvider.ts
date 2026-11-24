@@ -38,9 +38,9 @@ export class SpecStreamProvider implements IWebSearchProvider {
     const startedAt = Date.now();
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
-    let res: Response;
+    let payload: { data?: { sources?: Array<Record<string, unknown>> } } | null;
     try {
-      res = await fetch('https://api.specstream.ai/v1/web-search', {
+      const res = await fetch('https://api.specstream.ai/v1/web-search', {
         method: 'POST',
         headers: {
           Authorization: `Bearer ${apiKey}`,
@@ -53,15 +53,16 @@ export class SpecStreamProvider implements IWebSearchProvider {
         }),
         signal: controller.signal,
       });
+
+      await settleSearchAnswer(this.keyPool, apiKey, res, 'SpecStream', startedAt);
+
+      payload = (await res.json()) as {
+        data?: { sources?: Array<Record<string, unknown>> };
+      } | null;
     } finally {
       clearTimeout(timer);
     }
 
-    await settleSearchAnswer(this.keyPool, apiKey, res, 'SpecStream', startedAt);
-
-    const payload = (await res.json()) as {
-      data?: { sources?: Array<Record<string, unknown>> };
-    } | null;
     const sources = payload?.data?.sources;
     if (!Array.isArray(sources)) return [];
 

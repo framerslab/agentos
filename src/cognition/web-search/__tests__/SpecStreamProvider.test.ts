@@ -87,7 +87,7 @@ describe('SpecStreamProvider', () => {
       }
     ).keyPool;
     pool.markFailed('ss-alpha-0001', 'quota', { retryAfterMs: 0, status: 429 });
-    expect(pool.snapshot()[0]).toMatchObject({ status: 'cooldown', failures: 1 });
+    expect(pool.snapshot()[0]).toMatchObject({ status: 'resting', kind: 'quota', failures: 0 });
 
     fetchMock.mockResolvedValueOnce(answer(200, found));
     await provider.search('weather today');
