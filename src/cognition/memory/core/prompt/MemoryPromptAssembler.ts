@@ -377,7 +377,12 @@ function sectionText(section: Section): string {
 
 /**
  * Finds the original trace IDs with an unambiguous, unchanged entry in the sent memory sections.
- * Match complete rendered entries, including their formatting and any embedded newlines.
+ *
+ * A block that reaches the model whole, on lines of its own, shows every entry it rendered, two identical entries
+ * included. The rest of the text is read line by line: under a memory section's header, a complete rendered entry of
+ * that section is matched first, longest first, so a rule or a heading inside a multiline entry is never read as the
+ * end of its section. Read that way, an entry counts when it is its section's only rendering of that text and the text
+ * was sent once.
  *
  * @internal
  */
@@ -390,23 +395,55 @@ export function shownRecallTraceIds(context: AssembledMemoryContext, textParts: 
       ? new Set(context.shownTexts?.map(({ id }) => id))
       : new Set();
   }
-  const bodies = new Map(rendered.map(({ header }) => [header, [] as string[]]));
+
+  // The block sent whole, wherever it sits: the application note's opening line and the person's words, or other
+  // retrieved context after a horizontal rule, can stand around it.
   let intactBlocks = 0;
-  for (let text of textParts) {
-    const trimmed = text.trimEnd();
-    const start = trimmed.length - block.length;
-    if (block && trimmed.endsWith(block) && (start === 0 || trimmed[start - 1] === '\n')) {
-      intactBlocks += 1;
-      text = trimmed.slice(0, start);
+  const rest = textParts.map((text) => {
+    if (!block) return text;
+    let kept = '';
+    let from = 0;
+    let at = text.indexOf(block);
+    while (at >= 0) {
+      const end = at + block.length;
+      if ((at === 0 || text[at - 1] === '\n') && (end === text.length || text[end] === '\n')) {
+        intactBlocks += 1;
+        kept += `${text.slice(from, at)}\n`;
+        from = end;
+        at = text.indexOf(block, end);
+      } else {
+        at = text.indexOf(block, at + 1);
+      }
     }
-    // The application note can carry retrieved context after the memory block, separated by a horizontal rule.
-    const headings = Array.from(text.matchAll(/^## [^\n]+$|(?<=\n\n)---(?=\n\n)/gm))
-      .filter(([heading]) => heading === '---' || MEMORY_BLOCK_HEADERS.has(heading));
-    for (const [index, heading] of headings.entries()) {
-      const startOfBody = heading.index! + heading[0].length;
-      const endOfBody = headings[index + 1]?.index ?? text.length;
-      const section = bodies.get(heading[0]);
-      if (section) section.push(`${text.slice(startOfBody, endOfBody)}\n`);
+    return kept + text.slice(from);
+  });
+
+  const entryTexts = new Map(rendered.map(({ header, entries }) => [
+    header,
+    [...new Set(entries.map(({ text }) => text).filter(Boolean))].sort((a, b) => b.length - a.length),
+  ]));
+  const sent = new Map<string, Map<string, number>>();
+  for (const text of rest) {
+    let header: string | undefined;
+    for (let start = 0; start < text.length;) {
+      const texts = header === undefined ? undefined : entryTexts.get(header);
+      const entry = texts?.find((candidate) =>
+        text.startsWith(candidate, start) && (start + candidate.length === text.length || text[start + candidate.length] === '\n'),
+      );
+      if (entry !== undefined) {
+        const counts = sent.get(header!) ?? new Map<string, number>();
+        counts.set(entry, (counts.get(entry) ?? 0) + 1);
+        sent.set(header!, counts);
+        start += entry.length + 1;
+        continue;
+      }
+      const newline = text.indexOf('\n', start);
+      const end = newline < 0 ? text.length : newline;
+      const line = text.slice(start, end);
+      if (MEMORY_BLOCK_HEADERS.has(line)) header = line;
+      // The application note can carry retrieved context after the memory block, separated by a horizontal rule.
+      else if (line === '---' && start >= 2 && text.startsWith('\n\n', start - 2) && text.startsWith('\n\n', end)) header = undefined;
+      start = end + 1;
     }
   }
 
@@ -414,21 +451,13 @@ export function shownRecallTraceIds(context: AssembledMemoryContext, textParts: 
   for (const { header, entries } of rendered) {
     const originals = new Map<string, number>();
     for (const { text } of entries) originals.set(text, (originals.get(text) ?? 0) + 1);
-    const sent = new Map<string, number>();
-    const longestFirst = [...originals.keys()].sort((a, b) => b.length - a.length);
-    for (const body of bodies.get(header) ?? []) {
-      for (let start = body.indexOf('\n'); start >= 0; start = body.indexOf('\n', start + 1)) {
-        const entry = longestFirst.find((text) =>
-          body[start + 1 + text.length] === '\n' && body.startsWith(text, start + 1),
-        );
-        if (entry === undefined) continue;
-        sent.set(entry, (sent.get(entry) ?? 0) + 1);
-        // A multiline entry can quote another entry. Only count the full span.
-        start += entry.length;
-      }
-    }
+    const counts = sent.get(header);
     for (const { id, text } of entries) {
-      if (id !== undefined && originals.get(text) === 1 && (sent.get(text) ?? 0) + intactBlocks === 1) shown.add(id);
+      if (id === undefined) continue;
+      // Outside the whole block: a copy a hook added, or the entry itself when the block was changed.
+      const copies = counts?.get(text) ?? 0;
+      const unambiguous = intactBlocks === 1 ? copies === 0 : intactBlocks === 0 && originals.get(text) === 1 && copies === 1;
+      if (unambiguous) shown.add(id);
     }
   }
   return shown;

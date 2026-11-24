@@ -1237,8 +1237,8 @@ export function gmi(opts: GmiOptions): GmiHandle {
         opts.responseSchema,
         opts.controls?.maxValidationRetries ?? 1,
       );
-      // A signal that aborted once the turn had ended rejects the call too, and no source is retrieved for it.
-      callerSignal?.throwIfAborted();
+      // A turn that reached its commit point is complete: a signal that aborts after it leaves the call to finish, its
+      // sources checked. A stop before that point rejected above.
       // As agent().generate() does: the answer checked against the sources retrieved for the input as it was sent (the
       // text an input guard rewrote it to); a call whose input a guard replaced made no request, and is not checked.
       const decision = inputDecisionOf(first.guardReport);

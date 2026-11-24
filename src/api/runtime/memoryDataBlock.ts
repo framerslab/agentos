@@ -98,16 +98,21 @@ function isRenderedItem(value: unknown): value is RenderedRecallItem {
 
 /**
  * The original entries that occur unchanged and unambiguously in the outgoing recall blocks.
- * The wire format has no IDs, so a rendered entry must occur once on each side to identify its original.
+ * A block sent whole shows each of its items, two identical items included, unless the request carries another copy of
+ * an item. Otherwise, as the wire format has no IDs, a rendered entry must occur once on each side to identify its
+ * original.
  */
 export function shownMemoryRecallItems(items: readonly MemoryRecallItem[], messages: readonly ChatMessage[]): MemoryRecallItem[] {
-  const originals = new Map<string, MemoryRecallItem | undefined>();
+  const originals = new Map<string, number>();
   for (const item of items) {
     const key = itemKey(renderItem(item));
-    originals.set(key, originals.has(key) ? undefined : item);
+    originals.set(key, (originals.get(key) ?? 0) + 1);
   }
+  const whole = items.length > 0 ? renderMemoryRecallBlock(items) : '';
+  let intactBlocks = 0;
   const sent = new Map<string, number>();
   for (const text of recallTextParts(messages)) {
+    if (whole) intactBlocks += text.split(whole).length - 1;
     for (const [, json] of text.matchAll(/<memory_recall>([\s\S]*?)<\/memory_recall>/g)) {
       try {
         const block = parseJsonWithDistinctKeys(json) as { items?: unknown } | null;
@@ -122,8 +127,12 @@ export function shownMemoryRecallItems(items: readonly MemoryRecallItem[], messa
       }
     }
   }
-  return Array.from(originals, ([key, item]) => sent.get(key) === 1 ? item : undefined)
-    .filter((item): item is MemoryRecallItem => item !== undefined);
+  return items.filter((item) => {
+    const key = itemKey(renderItem(item));
+    const copies = originals.get(key) ?? 0;
+    const count = sent.get(key) ?? 0;
+    return intactBlocks === 1 ? count === copies : copies === 1 && count === 1;
+  });
 }
 
 const SPEAKERS: ReadonlySet<string> = new Set(['user', 'assistant', 'note']);
