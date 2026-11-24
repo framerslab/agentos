@@ -124,12 +124,13 @@ export interface ForgetUserMemoryOptions {
   /** Who receives a person's text (`recipients()` of a souled agent), copied into the report. Unset: none is listed. */
   recipients?: readonly MemoryRecipient[];
   /**
-   * The mind of a souled agent on `runtime: 'gmi'` with cognitive memory on, which files into this store: each of the
+   * The deletion side of a souled agent's mind, on either runtime and with cognitive memory on or off: each of the
    * subject's conversation keys, and each trace that names the user under another scope, is deleted through it first,
    * after the document chunks its rows were filed from and each trace's knowledge-graph copy and memory-graph node, and
    * then by the store's own pass, which reaches each row's vector and what the key still holds. A key the mind fails to
    * delete keeps what the mind did not delete of it, its traces, pages and registry row, so the deletion made again
-   * finds it; the report's `mind` part is then missed.
+   * finds it; the report's `mind` part is then missed. With no cognitive memory manager live in this process, it drops
+   * each trace's archived original and access log by trace id, with no model or embedding call.
    * The report's stores name it as `cognitive memory`. Unset: the part is reached with 0.
    *
    * @internal

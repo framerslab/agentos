@@ -7,7 +7,9 @@
  * last row, hash and seq, and refused once marked forgotten; trait rows are updated by version; freezes, sessions and
  * tombstones are kept, freezes listed in one order, one session's rows read back for every user, a session row's start
  * kept when it is written again and a session row written at the version its writer read; text is ordered by UTF-16 code unit, whatever order the database sorts
- * text in; a user's rows are deleted in one namespace only, and the tombstone stays; a transaction that throws takes
+ * text in; a user's rows are deleted in one namespace only, and the tombstone stays; the users one namespace's rows
+ * name are listed, a ledger row's second user included, and a user is listed no more once their rows are deleted; a
+ * transaction that throws takes
  * back every write it made, a deletion included, and no read sees one of them; a transaction's handle refuses every
  * call once its transaction has ended; every row a store is given or hands out is a copy; and a store writes no text
  * that holds a lone surrogate, which a SQL text column cannot hold, and reads, marks and deletes no other user's rows
@@ -370,6 +372,28 @@ export function runLearningStoreContract(name: string, open: () => Promise<Learn
         expect(await store.traitRow('B', 'tutor', '42')).toBeDefined();
         expect(await store.head('u|A|tutor|42')).toBeUndefined();
         expect(await store.isForgotten('hash-42')).toBe(true);
+      }));
+
+    it("lists the users one namespace's rows name, a ledger row's second user included, and none once their rows are deleted", () =>
+      withStore(async (store) => {
+        await store.insertLedgerRow(ledgerRow({ id: 'a-1' }));
+        await store.insertLedgerRow(ledgerRow({ id: 'a-2', chainKey: 't|A|tutor|9', userId: null, turnUserId: '9' }));
+        await store.insertLedgerRow(ledgerRow({ id: 'a-3', chainKey: 'a|A|tutor', userId: null }));
+        await store.insertLedgerRow(ledgerRow({ id: 'b-1', chainKey: 'u|B|tutor|8', namespace: 'B', userId: '8' }));
+        await store.insertHead(headRow({ chainKey: 'u|A|tutor|5', userId: '5', lastId: 'h-5' }));
+        await store.insertTraitRow(traitRow({ userId: '6' }));
+        await store.putSessionRow(sessionRow({ userId: '7' }));
+        await store.insertFreeze(freezeRow({ scopeKey: 'learner|A|tutor|4', mode: 'off', namespace: 'A', userId: '4' }));
+
+        expect([...(await store.listUserIds!('A'))].sort()).toEqual(['4', '42', '5', '6', '7', '9']);
+        expect(await store.listUserIds!('B')).toEqual(['8']);
+        expect(await store.listUserIds!('C')).toEqual([]);
+
+        await store.deleteUserRows('A', '42');
+        await store.deleteUserRows('A', '9');
+
+        expect([...(await store.listUserIds!('A'))].sort()).toEqual(['4', '5', '6', '7']);
+        expect(await store.listUserIds!('B')).toEqual(['8']);
       }));
 
     it('leaves nothing behind when a transaction throws', () =>
