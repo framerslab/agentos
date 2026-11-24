@@ -92,6 +92,7 @@ export class GmiTurnFolder {
   private readonly calls: Array<{ call: ToolCallRequest; result?: ToolResultChunkPayload }> = [];
   private readonly overrides = new Map<number, string>();
   private readonly failed: GmiFailedAttempt[] = [];
+  private readonly priorUsage = emptyUsage();
   private failure: GmiTurnError | undefined;
   /** The provider and model the turn's first model call was routed to, and who waits for them. */
   private firstRoute: { providerId: string; modelId: string } | undefined;
@@ -163,6 +164,17 @@ export class GmiTurnFolder {
   /** Records the GMI's decision to run after-turn work. Later failures keep their own error. */
   markCommitted(): void {
     this.committed = true;
+  }
+
+  /** Starts a repair, keeping the earlier attempt's usage for the turn's accounting. */
+  startRepair(): void {
+    addTokenUsage(this.priorUsage, this.usage());
+    this.steps.length = 0;
+    this.calls.length = 0;
+    this.failed.length = 0;
+    this.overrides.clear();
+    this.callsBeforeLastStep = 0;
+    this.lastStepCalledTools = false;
   }
 
   /** Records recall, history and the reply from the GMI's output that ended the turn. */
@@ -304,11 +316,18 @@ export class GmiTurnFolder {
     return last?.refused === true ? this.overrides.get(last.stepIndex) ?? last.text : this.text();
   }
 
-  /** Each step's usage once, plus every billed failed attempt. */
+  /** Each step's usage in this attempt, plus its billed provider failures. */
   usage(): TokenUsage {
     const total = emptyUsage();
     for (const step of this.steps) addModelUsage(total, step.usage);
     for (const attempt of this.failed) addTokenUsage(total, attempt.usage);
+    return total;
+  }
+
+  /** The whole turn's usage, including completed schema attempts. */
+  totalUsage(): TokenUsage {
+    const total = this.usage();
+    addTokenUsage(total, this.priorUsage);
     return total;
   }
 

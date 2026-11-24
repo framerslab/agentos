@@ -1052,7 +1052,9 @@ export function gmi(opts: GmiOptions): GmiHandle {
         // The tools the call offers: none on a structured send's calls, and on
         // a seat's turn only the tools its tool names allow.
         const names = turn.toolNames;
-        const offered = turn.structured ? [] : names ? tools.filter((tool) => names.has(tool.name)) : tools;
+        const offered = turn.structured || ctx.schemaRepairPrompt !== undefined
+          ? []
+          : names ? tools.filter((tool) => names.has(tool.name)) : tools;
         // A call that offers no tool gets no chain-of-thought instruction, as
         // agent() sends none with a structured send's calls; every call that
         // offers tools gets it first in its system prompt.
@@ -1093,7 +1095,7 @@ export function gmi(opts: GmiOptions): GmiHandle {
               model: ctx.modelId,
               provider: ctx.providerId,
               step: ctx.stepIndex,
-              prompt: turn.prompt,
+              prompt: ctx.schemaRepairPrompt ?? turn.prompt,
             })), turn.abortSignal);
             if (modified?.messages) {
               messages = modified.messages as unknown as ChatMessage[];
@@ -1234,7 +1236,7 @@ export function gmi(opts: GmiOptions): GmiHandle {
       callerSignal?.throwIfAborted();
       // A turn the caller's signal stopped rejects with its reason, as a session's send does, and a failure that came
       // before the stop keeps its own error: sendGmiTurn decides when the turn's failure is recorded.
-      const { result, first } = await generateGmiTurn(
+      const result = await generateGmiTurn(
         oneShotDeps('agent.generate', extra),
         prompt,
         { options, ...callTurn(extra) },
@@ -1245,9 +1247,9 @@ export function gmi(opts: GmiOptions): GmiHandle {
       // sources checked. A stop before that point rejected above.
       // As agent().generate() does: the answer checked against the sources retrieved for the input as it was sent (the
       // text an input guard rewrote it to); a call whose input a guard replaced made no request, and is not checked.
-      const decision = inputDecisionOf(first.guardReport);
+      const decision = inputDecisionOf(result.guardReport);
       if (opts.verifyCitations && decision !== 'replaced') {
-        const sent = decision === 'sanitized' ? first.transcriptDelta?.find((message) => message.role === 'user')?.content : prompt;
+        const sent = decision === 'sanitized' ? result.transcriptDelta?.find((message) => message.role === 'user')?.content : prompt;
         const userText = typeof sent === 'string' ? sent : sent ? extractTextFromContent(sent as MessageContent) : '';
         result.grounding = await runCitationVerification(result.text, userText, opts.verifyCitations);
       }
@@ -1538,6 +1540,7 @@ export function gmi(opts: GmiOptions): GmiHandle {
             options,
             responseSchema: sendOpts?.responseSchema,
             schemaName: sendOpts?.schemaName,
+            maxValidationRetries: sendOpts?.maxValidationRetries,
             blockLabel: sendOpts?.blockLabel,
             abortSignal: turnSignal(callerSignal),
             ...(callerSignal ? { callerSignal } : {}),

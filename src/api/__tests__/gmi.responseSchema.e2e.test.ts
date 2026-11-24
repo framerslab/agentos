@@ -50,7 +50,7 @@ describe.each(constructors)('$name response schema', ({ create }) => {
   }
   const setup = (...replies: string[]) => setupWith({}, ...replies);
 
-  it('sends a repair turn and rejects with the final validation error', async () => {
+  it('requests a repair and rejects with the final validation error', async () => {
     const first = 'three';
     const last = '{"count":"still three"}';
     const { handle, provider } = setup(first, last);

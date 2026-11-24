@@ -513,7 +513,7 @@ export interface SessionSendOptions<S extends ZodType | undefined = undefined> {
    * Sanitized to /[a-zA-Z0-9_]/ and truncated to 64 chars.
    */
   schemaName?: string;
-  /** Extra schema-validation attempts on the default runtime. Defaults to 0. */
+  /** Extra attempts to repair an invalid schema reply on either runtime. Defaults to 0. */
   maxValidationRetries?: number;
   /**
    * Telemetry + eviction-boundary label for this send's transcript block.

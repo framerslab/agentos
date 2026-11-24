@@ -1694,7 +1694,7 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
   /** The store's own Brain, which the soul's mind files into and reads on the GMI runtime with cognitive memory on. */
   const soulBrain = brainOf(memory);
   /**
-   * The archive on the soul's Brain is available for deletion on either runtime. With no manager live, the deletion
+   * The archive on the soul's Brain is available for exports and deletion on either runtime. With no manager live, deletion
    * drops originals by trace id without building a manager or calling its embedding provider.
    */
   const mindArchive = new SqlStorageMemoryArchive(soulBrain.adapter, soulBrain.features, soulBrain.brainId);
@@ -3207,7 +3207,7 @@ export async function souledAgent(opts: SouledAgentOptions): Promise<SouledAgent
         recipients: listRecipients,
         retention: { period: retention?.traces ?? 'none', ...(days !== undefined ? { policyDays: days } : {}) },
         profilingOf: sentimentOf,
-        ...(mindRecalls ? { archive: mindArchive } : {}),
+        archive: mindArchive,
         ...(liveGraph ? { liveGraph } : {}),
         ...(exportLearned ? { learner: () => exportLearned.call(built.learning, userId) } : {}),
         ...(legacyGmi.store ? { legacyGmiStore: legacyGmi.store } : {}),

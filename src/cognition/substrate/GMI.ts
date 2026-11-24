@@ -1982,6 +1982,9 @@ export class GMI implements IGMI {
       // -------------------------------------------------------------------
       let safetyBreak = 0;
       const maxToolLoopIterations = this.config.maxToolLoopIterations ?? 5;
+      const checkTurnReply = turnInput.metadata?.onTurnReply;
+      let replyCheck: ReturnType<NonNullable<typeof checkTurnReply>> | undefined;
+      let schemaRepairPrompt: string | undefined;
       // Prompt-cache diagnostics run through the turn's steps as they run through
       // generateText's: the first step compares against the message the turn (or
       // the persona) names, each later step against the previous step's response.
@@ -2004,7 +2007,7 @@ export class GMI implements IGMI {
       }
       let structuredAttempts = 0;
       let structuredResult: StructuredReplyOutput | undefined;
-      main_processing_loop: while (safetyBreak < maxToolLoopIterations) {
+      main_processing_loop: while (safetyBreak < maxToolLoopIterations || schemaRepairPrompt !== undefined) {
         safetyBreak++;
         let augmentedContextFromRAG = "";
         const injectedLongTermMemoryContext =
@@ -2201,12 +2204,13 @@ export class GMI implements IGMI {
             : 'all';
         const capabilityDiscoveryResult = turnInput.metadata?.capabilityDiscovery?.result;
 
-        let toolsForLLM = await this.toolOrchestrator.listAvailableTools({
+        let toolsForLLM = schemaRepairPrompt !== undefined ? [] : await this.toolOrchestrator.listAvailableTools({
           personaId: this.activePersona.id,
           personaCapabilities: this.activePersona.allowedCapabilities || [],
           userContext: this.currentUserContext,
         });
         if (
+          schemaRepairPrompt === undefined &&
           plannedToolSelectionMode === 'discovered' &&
           capabilityDiscoveryResult &&
           typeof this.toolOrchestrator.listDiscoveredTools === 'function'
@@ -2491,6 +2495,7 @@ export class GMI implements IGMI {
                 hop: resolution?.hop ?? 0,
                 providerId: modelTargetInfo.providerId,
                 modelId: modelTargetInfo.modelId,
+                ...(schemaRepairPrompt !== undefined ? { schemaRepairPrompt } : {}),
                 messages: [...promptForHook],
               });
               if (Array.isArray(replaced)) {
@@ -2627,7 +2632,7 @@ export class GMI implements IGMI {
               // refusal, and they are neither requested nor run, as generateText() and streamText() drop them.
               if (chunk.isFinal && typeof choice?.refusal === 'string') stepRefusal = choice.refusal;
 
-              if (stepRefusal === undefined && choice?.message?.tool_calls && choice.message.tool_calls.length > 0) {
+              if (schemaRepairPrompt === undefined && stepRefusal === undefined && choice?.message?.tool_calls && choice.message.tool_calls.length > 0) {
                 currentIterationToolCallRequests = choice.message.tool_calls.map((tc: any) => ({ // tc is from IProvider.ChatMessage.tool_calls
                     id: tc.id || `toolcall-${uuidv4()}`, // Ensure ID
                     name: tc.function.name,
@@ -2856,10 +2861,9 @@ export class GMI implements IGMI {
             : undefined,
           ...(currentIterationThinkingBlocks.length > 0 && { thinkingBlocks: currentIterationThinkingBlocks }),
         };
-        this.conversationHistoryManager.push(assistantMessage);
-        turnMessages.push(assistantMessage);
-
         if (currentIterationToolCallRequests.length > 0) {
+          this.conversationHistoryManager.push(assistantMessage);
+          turnMessages.push(assistantMessage);
           // The first tool round reads the turn's user context: the sentiment analysis settles first, within its budget.
           if (!firstToolSentimentRead) {
             firstToolSentimentRead = true;
@@ -2966,7 +2970,29 @@ export class GMI implements IGMI {
           }
           if (toolRoundFailure) throw toolRoundFailure.error;
           if (ownsState()) this.state = GMIPrimeState.PROCESSING;
-          continue main_processing_loop;
+          if (!checkTurnReply || safetyBreak < maxToolLoopIterations) continue main_processing_loop;
+        }
+
+        // A repair continues this turn. Its messages are prompt context only, and the history budget protects them
+        // along with the original question and tool results. Only the accepted answer goes to after-turn work.
+        if (checkTurnReply && !stop.signal.aborted) {
+          replyCheck = checkTurnReply(true);
+          if (replyCheck.kind === 'rejected') break main_processing_loop;
+          if (replyCheck.kind === 'repair') {
+            if (currentIterationToolCallRequests.length === 0) {
+              turnMessages.push({ ...assistantMessage, content: replyCheck.text || null });
+            }
+            schemaRepairPrompt = replyCheck.prompt;
+            turnMessages.push({ role: 'user', content: schemaRepairPrompt });
+            aggregatedResponseText = '';
+            continue main_processing_loop;
+          }
+          aggregatedResponseText = replyCheck.text;
+          if (currentIterationToolCallRequests.length === 0) assistantMessage.content = replyCheck.text || null;
+        }
+        if (currentIterationToolCallRequests.length === 0) {
+          this.conversationHistoryManager.push(assistantMessage);
+          turnMessages.push(assistantMessage);
         }
         break main_processing_loop; // Break if no tool calls
       }
@@ -2974,6 +3000,10 @@ export class GMI implements IGMI {
       // Commit before the first after-turn operation, including on a GMI without cognitive memory.
       if (stop.signal.aborted) {
         throw new GMIError('Turn aborted before it committed.', GMIErrorCode.LLM_PROVIDER_ERROR, { turnId });
+      }
+      if (safetyBreak === 0) replyCheck = checkTurnReply?.(false);
+      if (replyCheck?.kind === 'rejected') {
+        return { isFinal: true, responseText: null, usage: aggregatedUsage };
       }
       committed = true;
       turnInput.metadata?.onTurnCommitted?.();
