@@ -369,6 +369,55 @@ describe.each(RUNTIMES)('with %s', (_name, runtime) => {
       expect(shown.map(({ id }) => id)).not.toContain(assistant.id);
     });
 
+    it('lists both of two identical provider memories when the block reaches the model unchanged', async () => {
+      const agent = await open({ capture: DETAIL });
+      const episode = await rememberForReader(agent, PROVIDER);
+      // The same words stored as a fact are a trace of their own, which the block shows as the same item.
+      const fact = await agent.memory!.remember(PROVIDER, {
+        type: 'semantic',
+        scope: 'conversation',
+        scopeId: conversationScopeKey(AGENT, { kind: 'user', id: USER }),
+        metadata: { speaker: 'user' },
+      });
+      expect(fact.id).not.toBe(episode.id);
+
+      const result = await agent.session('reader', { userId: USER }).send(QUESTION);
+      const sent = readProviderBlock(blocksOfLastCall().provider).items;
+      expect(sent).toHaveLength(2);
+      expect(sent[1]).toEqual(sent[0]);
+      expect(sent[0]).toMatchObject({ text: PROVIDER.replace(/ /g, '^'), speaker: 'user' });
+      const listed = result.memoryShown?.filter(({ source }) => source === 'provider') ?? [];
+      expect(listed.map(({ id }) => id).sort()).toEqual([episode.id, fact.id].sort());
+      expect(listed.map(({ text }) => text)).toEqual([PROVIDER, PROVIDER]);
+    });
+
+    it('lists a multiline mind memory left unchanged when the hook removes another', async () => {
+      // A rule and a section heading inside one memory are part of its entry, not boundaries of the block.
+      const notes = 'My canary is named LARK-7.\n\n---\n\n## Observations\nIt sings at dawn.';
+      const agent = await open({ capture: DETAIL }, {
+        onBeforeGeneration: async (context) => ({
+          ...context,
+          messages: context.messages.map((message) => editMindRecall(message, (text) =>
+            text.split('\n').filter((line) => !line.includes(MIND_ASSISTANT)).join('\n'),
+          )),
+        }),
+      });
+      const filing = await agent.session('filing', { userId: USER }).send(notes);
+      await filing.memoryWrite;
+      const { traces } = await agent.exportUserMemory!(USER);
+      const user = traces.find(({ text }) => text === notes)!;
+      expect(user).toBeDefined();
+      expect(traces.some(({ text }) => text === MIND_ASSISTANT)).toBe(true);
+
+      const result = await agent.session('reader', { userId: USER }).send(QUESTION);
+      const sent = blocksOfLastCall();
+      expect(sent.mind).toContain(notes);
+      expect(sent.mind).not.toContain(MIND_ASSISTANT);
+      expect(result.memoryShown?.filter(({ source }) => source === 'memory') ?? []).toEqual([
+        { source: 'memory', id: user.id, text: notes, speaker: 'user', at: user.createdAt },
+      ]);
+    });
+
     it('lists what the serving fallback hop was sent when a hook leaves the provider block out there', async () => {
       const fallbackKey = `k-recall-detail-fallback-${++serial}`;
       const fallback = script('anthropic', fallbackKey, { whole: true, replies: [reply.text(REPLY)] });

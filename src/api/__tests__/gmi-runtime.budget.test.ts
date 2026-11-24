@@ -189,6 +189,32 @@ describe('a spend budget on the GMI path', () => {
     expect(embedFn).not.toHaveBeenCalled();
   });
 
+  it('generate() completes a turn whose signal aborts after the turn has committed, and checks its citations', async () => {
+    const k = key();
+    const s = script('openai', k, { replies: [reply.text('Answer.')] });
+    const stop = new AbortController();
+    const retrieve = vi.fn(async () => [{ content: 'Answer.' }]);
+    const embedFn = vi.fn(async (texts: string[]) => texts.map(() => [1, 0]));
+    const a = gmi({
+      provider: 'openai', model: 'stub-model', apiKey: k, instructions: 'Answer.', maxTokens: 100,
+      // A memory provider observes a turn only once it has committed: the stop comes after the GMI's last check.
+      memoryProvider: {
+        observe: async () => {
+          stop.abort(new Error('stopped after commit'));
+        },
+      },
+      verifyCitations: { retrieve, embedFn },
+    });
+
+    const result = await a.generate('Hi.', { abortSignal: stop.signal });
+    expect(stop.signal.aborted).toBe(true);
+    expect(s.seen).toHaveLength(1);
+    expect(result.text).toBe('Answer.');
+    expect(result.usage.totalTokens).toBeGreaterThan(0);
+    expect(retrieve).toHaveBeenCalledTimes(1);
+    expect(result.grounding).toBeDefined();
+  });
+
   it("a session send keeps its turn's own failure when the caller's signal aborts after it", async () => {
     const k = key();
     const s = script('openai', k, { replies: [costlyTools([{ id: 't1', name: 'lookup', args: {} }], 2_950), reply.text('Unused.')] });

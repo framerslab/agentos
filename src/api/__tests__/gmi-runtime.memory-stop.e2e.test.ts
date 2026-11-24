@@ -157,8 +157,9 @@ describe('GMI cognitive memory when a turn stops', () => {
       embedding.release();
 
       await closing;
-      expect(await filed()).toEqual(FILED_EXCHANGE);
+      // The send settles after its writes: a caller's abort has no close() to wait on.
       expect(await turn).toMatchObject({ text: ASSISTANT_TEXT, usage: expect.objectContaining(STEP_USAGE) });
+      expect(await filed()).toEqual(FILED_EXCHANGE);
       expect(session.messages().at(-1)).toMatchObject({ content: ASSISTANT_TEXT });
       expect(session.messages().at(-1)).not.toMatchObject({ partial: true });
       expect(await session.usage()).toMatchObject(STEP_USAGE);
