@@ -753,9 +753,9 @@ export interface ResourceControls {
    * Defaults to `1` (one extra attempt = two total calls). Set to `0` to
    * disable retries entirely.
    * Also used by `agent().generate()` with `responseSchema`, on both runtimes.
-   * On the legacy runtime a session's `send()` takes its own
-   * `maxValidationRetries`, defaulting to 0; on the GMI runtime a schema send
-   * has no repair turn.
+   * A session's `send()` takes its own `maxValidationRetries` on both
+   * runtimes, defaulting to 0. On the GMI runtime the repairs of `generate()`
+   * and of a schema send are further steps of the call's one turn.
    */
   maxValidationRetries?: number;
   /**

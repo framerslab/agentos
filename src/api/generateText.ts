@@ -495,9 +495,12 @@ export interface GenerateTextOptions {
    */
   toolChoice?: string | Record<string, unknown>;
   /**
-   * Provider-specific response format for an agent's `generate()` call on the
-   * GMI runtime. The agent still validates the reply against its
-   * `responseSchema` when configured. The legacy runtime ignores this option.
+   * Provider-specific response format for one call of an agent on the GMI
+   * runtime: its `generate()` and `stream()` send it with the call's requests.
+   * With an agent-level `responseSchema`, `generate()` still states that
+   * schema in each request and validates the reply against it.
+   * `generateText()`, `streamText()` and an agent on the legacy runtime
+   * ignore this option.
    */
   responseFormat?: ModelCompletionOptions['responseFormat'];
   /**
