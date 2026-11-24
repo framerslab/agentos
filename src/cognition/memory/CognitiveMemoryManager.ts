@@ -1303,6 +1303,7 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
       prospectiveAlerts,
       graphContext,
       observationNotes: [], // Filled externally by the GMI turn loop
+      captureRecallEntries: textTraces !== undefined,
     };
 
     const context = assembleMemoryContext(input);

@@ -7,6 +7,8 @@
  * @module api/runtime/memoryDataBlock
  */
 import type { SystemContentBlock } from '../generateText.js';
+import type { ChatMessage } from '../../core/llm/providers/IProvider.js';
+import { parseJsonWithDistinctKeys } from './structuredReply.js';
 
 /** The marker datamarking puts in place of each run of whitespace inside recalled text. */
 export const MEMORY_DATA_MARK = '^';
@@ -48,6 +50,17 @@ function safeJson(value: unknown): string {
   return JSON.stringify(value).replace(/[<>&\u2028\u2029]/g, (character) => ESCAPES[character]);
 }
 
+type RenderedRecallItem = MemoryRecallBlock['items'][number];
+
+function renderItem({ speaker, page, when, text }: MemoryRecallItem): RenderedRecallItem {
+  return {
+    ...(speaker ? { speaker } : {}),
+    ...(page ? { page } : {}),
+    ...(when ? { when } : {}),
+    text: String(text).replace(/\s+/g, MEMORY_DATA_MARK),
+  };
+}
+
 /**
  * `<memory_recall>` + the block as safe JSON + `</memory_recall>`, each item's text datamarked. The raw block holds no
  * `<` or `>` but its own two tags. Only the four declared members of an item are written.
@@ -58,14 +71,59 @@ export function renderMemoryRecallBlock(items: readonly MemoryRecallItem[]): str
   const block: MemoryRecallBlock = {
     kind: 'memory_recall',
     note: MEMORY_RECALL_NOTE,
-    items: items.map(({ speaker, page, when, text }) => ({
-      ...(speaker ? { speaker } : {}),
-      ...(page ? { page } : {}),
-      ...(when ? { when } : {}),
-      text: String(text).replace(/\s+/g, MEMORY_DATA_MARK),
-    })),
+    items: items.map(renderItem),
   };
   return `<${MEMORY_RECALL_TAG}>${safeJson(block)}</${MEMORY_RECALL_TAG}>`;
+}
+
+/** The request's text, keeping message and part boundaries so entries cannot match across them. */
+export function recallTextParts(messages: readonly ChatMessage[]): string[] {
+  return messages.flatMap(({ content }) =>
+    typeof content === 'string' ? [content] : Array.isArray(content)
+      ? content.flatMap((part) => 'text' in part && typeof part.text === 'string' ? [part.text] : [])
+      : [],
+  );
+}
+
+function itemKey({ speaker, page, when, text }: RenderedRecallItem): string {
+  return JSON.stringify([speaker, page, when, text]);
+}
+
+function isRenderedItem(value: unknown): value is RenderedRecallItem {
+  if (typeof value !== 'object' || value === null || typeof (value as { text?: unknown }).text !== 'string') return false;
+  return Object.entries(value).every(([key, field]) =>
+    typeof field === 'string' && (key === 'text' || key === 'speaker' || key === 'page' || key === 'when'),
+  );
+}
+
+/**
+ * The original entries that occur unchanged and unambiguously in the outgoing recall blocks.
+ * The wire format has no IDs, so a rendered entry must occur once on each side to identify its original.
+ */
+export function shownMemoryRecallItems(items: readonly MemoryRecallItem[], messages: readonly ChatMessage[]): MemoryRecallItem[] {
+  const originals = new Map<string, MemoryRecallItem | undefined>();
+  for (const item of items) {
+    const key = itemKey(renderItem(item));
+    originals.set(key, originals.has(key) ? undefined : item);
+  }
+  const sent = new Map<string, number>();
+  for (const text of recallTextParts(messages)) {
+    for (const [, json] of text.matchAll(/<memory_recall>([\s\S]*?)<\/memory_recall>/g)) {
+      try {
+        const block = parseJsonWithDistinctKeys(json) as { items?: unknown } | null;
+        if (!Array.isArray(block?.items)) continue;
+        for (const item of block.items) {
+          if (!isRenderedItem(item)) continue;
+          const key = itemKey(item);
+          sent.set(key, (sent.get(key) ?? 0) + 1);
+        }
+      } catch {
+        // A malformed block has no entries we can attribute.
+      }
+    }
+  }
+  return Array.from(originals, ([key, item]) => sent.get(key) === 1 ? item : undefined)
+    .filter((item): item is MemoryRecallItem => item !== undefined);
 }
 
 const SPEAKERS: ReadonlySet<string> = new Set(['user', 'assistant', 'note']);

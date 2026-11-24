@@ -340,7 +340,8 @@ describe.each(RUNTIMES)('with %s', (_name, runtime) => {
               );
               return { ...message, content: `<memory_recall>${JSON.stringify(block)}</memory_recall>` };
             }
-            return editMindRecall(message, (text) => text.replace(MIND_USER, changedMind));
+            return editMindRecall(message, (text) => text.replace(MIND_USER, changedMind).split('\n')
+              .flatMap((line) => line.includes(MIND_ASSISTANT) ? [line, line] : [line]).join('\n'));
           }),
         }),
       });
@@ -348,11 +349,13 @@ describe.each(RUNTIMES)('with %s', (_name, runtime) => {
       const other = await rememberForReader(agent, OTHER_PROVIDER);
       const { traces } = await agent.exportUserMemory!(USER);
       const user = traces.find(({ text }) => text === MIND_USER)!;
+      const assistant = traces.find(({ text }) => text === MIND_ASSISTANT)!;
 
       const result = await agent.session('reader', { userId: USER }).send(QUESTION);
       const sent = blocksOfLastCall();
       expect(sent.mind).toContain(changedMind);
       expect(sent.mind).not.toContain(MIND_USER);
+      expect(sent.mind.split('\n').filter((line) => line.includes(MIND_ASSISTANT))).toHaveLength(2);
       const sentItems = readProviderBlock(sent.provider).items;
       expect(sentItems.some(({ text }) => text === changedProvider)).toBe(true);
       expect(sentItems.filter(({ text }) => text === OTHER_PROVIDER.replace(/ /g, '^'))).toHaveLength(2);
@@ -361,6 +364,7 @@ describe.each(RUNTIMES)('with %s', (_name, runtime) => {
       expect(shown.map(({ id }) => id)).not.toContain(provider.id);
       expect(shown.map(({ id }) => id)).not.toContain(other.id);
       expect(shown.map(({ id }) => id)).not.toContain(user.id);
+      expect(shown.map(({ id }) => id)).not.toContain(assistant.id);
     });
 
     it('lists what the serving fallback hop was sent when a hook leaves the provider block out there', async () => {

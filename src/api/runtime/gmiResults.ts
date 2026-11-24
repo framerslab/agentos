@@ -74,8 +74,8 @@ export interface GmiTurnFolderOptions {
    * streamText report it: it is the thread key for the next request's diagnostics.
    */
   cacheDiagnostics?: boolean;
-  /** Called once, when the turn's failure is first recorded (an ERROR chunk or a thrown error). */
-  onFailure?: () => void;
+  /** Called when the turn's failure is first recorded, with whether the GMI had reached its commit point. */
+  onFailure?: (committed: boolean) => void;
 }
 
 /**
@@ -85,6 +85,7 @@ export interface GmiTurnFolderOptions {
 export class GmiTurnFolder {
   constructor(private readonly options: GmiTurnFolderOptions = {}) {}
 
+  private committed = false;
   /** The STEP_FINISHED payloads, in order. */
   readonly steps: StepFinishedChunkPayload[] = [];
   /** Every requested call in order, with its result once the TOOL_RESULT arrived. */
@@ -151,12 +152,17 @@ export class GmiTurnFolder {
           message: String(chunk.content),
           details: details?.details,
         };
-        if (first) this.options.onFailure?.();
+        if (first) this.options.onFailure?.(this.committed);
         break;
       }
       default:
         break;
     }
+  }
+
+  /** Records the GMI's decision to run after-turn work. Later failures keep their own error. */
+  markCommitted(): void {
+    this.committed = true;
   }
 
   /** Records recall, history and the reply from the GMI's output that ended the turn. */
@@ -234,7 +240,7 @@ export class GmiTurnFolder {
       message: error instanceof Error ? error.message : String(error),
       details: error instanceof GMIError ? error.details : undefined,
     };
-    this.options.onFailure?.();
+    this.options.onFailure?.(this.committed);
   }
 
   /**

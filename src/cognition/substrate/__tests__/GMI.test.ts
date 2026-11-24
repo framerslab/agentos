@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { GMI } from '../GMI';
-import { IGMI, GMIBaseConfig, GMITurnInput, GMIInteractionType, GMIPrimeState, GMIMood, UserContext, TaskContext, GMIOutputChunkType } from '../IGMI';
+import { IGMI, GMIBaseConfig, GMITurnInput, GMIInteractionType, GMIPrimeState, GMIMood, UserContext, TaskContext, GMIOutputChunkType, type StepFinishedChunkPayload } from '../IGMI';
 import { IPersonaDefinition } from '../personas/IPersonaDefinition';
 import { IWorkingMemory } from '../memory/IWorkingMemory';
 import { IPromptEngine } from '../../../core/llm/IPromptEngine';
@@ -554,16 +554,16 @@ describe('GMI turn-summary ingestion with a StatisticalUtilityAI', () => {
         content: userInput,
         metadata: { options: { abortSignal: stop.signal } },
       });
-      let stepFinished = false;
+      let stepText: string | undefined;
       let next = await stream.next();
       while (!next.done) {
         if (next.value.type === GMIOutputChunkType.STEP_FINISHED) {
-          stepFinished = true;
+          stepText = (next.value.content as StepFinishedChunkPayload).text;
           if (stopped) stop.abort();
         }
         next = await stream.next();
       }
-      expect(stepFinished).toBe(true);
+      expect(stepText).toBeTruthy();
       expect({
         ingestions: vi.mocked(mockRetrievalAugmentor.ingestDocuments).mock.calls.length,
         reflectionChecks: turnGmi.getReasoningTrace().entries.filter(({ type }) => type === 'SELF_REFLECTION_TRIGGERED').length,
@@ -572,7 +572,7 @@ describe('GMI turn-summary ingestion with a StatisticalUtilityAI', () => {
         expect(next.value.error).toMatchObject({ message: expect.stringMatching(/abort/i) });
       } else {
         expect(next.value.error).toBeUndefined();
-        expect(next.value.responseText).toBe('Mock stream response.');
+        expect(next.value.responseText).toBe(stepText);
       }
     } finally {
       await turnGmi.shutdown();

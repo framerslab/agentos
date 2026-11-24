@@ -1100,17 +1100,7 @@ export function gmi(opts: GmiOptions): GmiHandle {
             if (!turn.abortSignal?.aborted) console.warn('[agentos] onBeforeGeneration hook error:', hookError);
           }
         }
-        // The provider's items count as shown only when this call's messages, after the host's hook, still hold the
-        // block as it was rendered: a hook can drop or rewrite it, a fallback hop's call included. The session keeps
-        // each step's serving call's answer for the turn's `memoryShown`.
-        if (turn.onProviderMemoryShown) {
-          const block = turn.memoryContext;
-          turn.onProviderMemoryShown(block !== undefined && messages.some(({ content }) =>
-            typeof content === 'string'
-              ? content.includes(block)
-              : Array.isArray(content) && content.some((part) => 'text' in part && typeof part.text === 'string' && part.text.includes(block)),
-          ));
-        }
+        turn.onRecallPrompt?.(messages);
         return changed ? messages : undefined;
       },
     };
@@ -1457,8 +1447,7 @@ export function gmi(opts: GmiOptions): GmiHandle {
         };
       };
 
-      // A turn runs under the session's stop and the caller's own signal, when it
-      // passes one: either ends the turn, and only close() ends the session.
+      // Either signal can stop the turn until it commits. Only close() ends the session.
       const turnSignal = (callerSignal: AbortSignal | undefined): AbortSignal =>
         callerSignal ? AbortSignal.any([stopTurns.signal, callerSignal]) : stopTurns.signal;
 
@@ -1474,7 +1463,7 @@ export function gmi(opts: GmiOptions): GmiHandle {
         return seat && agentBudget ? bothBudgets(budget, agentBudget) : budget;
       };
 
-      /** Stops the running turn and shuts the session's GMI down, once; it ends no memory (see close()). */
+      /** Requests a stop, waits for the turn and shuts the session's GMI down once. */
       const shutdown = (): Promise<void> =>
         (closing ??= (async () => {
           if (sessions.get(sessionId) === entry) sessions.delete(sessionId);
@@ -1581,11 +1570,9 @@ export function gmi(opts: GmiOptions): GmiHandle {
           history?.reseed([]);
           syncGmiHistory();
         },
-        // A turn still running is stopped: its model call is aborted, its caller
-        // gets the abort error, and the steps it finished stay in this session's
-        // history, marked partial. Once it has ended, the session's GMI is shut
-        // down. The next agent.session(id) builds a new session, which starts
-        // empty. With memory.store, close() also records in the store that the
+        // An uncommitted turn ends on the stop and keeps its finished steps as partial. A committed turn finishes
+        // its after-turn work. Once the turn has ended, the session's GMI is shut down. The next agent.session(id)
+        // builds a new session, which starts empty. With memory.store, close() also records in the store that the
         // id's generation ended, and rejects when the store does not record it.
         close: async (): Promise<void> => {
           if (!end) return shutdown();
