@@ -527,6 +527,58 @@ describe('GMI turn-summary ingestion with a StatisticalUtilityAI', () => {
     return (ingest.mock.calls[0][0] as { content: string }).content;
   }
 
+  it.each([false, true])('gates after-turn work without cognitive memory (stopped: %s)', async (stopped) => {
+    vi.clearAllMocks();
+    const turnGmi = new GMI('turn-without-cognitive-memory');
+    const stop = new AbortController();
+    await turnGmi.initialize({
+      ...mockPersona,
+      memoryConfig: {
+        enabled: true,
+        ragConfig: { enabled: true, ingestionTriggers: { onTurnSummary: true } },
+      },
+      metaPrompts: [{
+        id: 'gmi_self_trait_adjustment',
+        description: 'Reflect on the exchange',
+        promptTemplate: 'Reflect: {{evidence}}',
+        trigger: { type: 'turn_interval', intervalTurns: 1 },
+        modelId: 'mock-model',
+      }],
+    }, mockBaseConfig);
+
+    try {
+      const stream = turnGmi.processTurnStream({
+        interactionId: 'turn-commit',
+        userId: 'user-test',
+        type: GMIInteractionType.TEXT,
+        content: userInput,
+        metadata: { options: { abortSignal: stop.signal } },
+      });
+      let stepFinished = false;
+      let next = await stream.next();
+      while (!next.done) {
+        if (next.value.type === GMIOutputChunkType.STEP_FINISHED) {
+          stepFinished = true;
+          if (stopped) stop.abort();
+        }
+        next = await stream.next();
+      }
+      expect(stepFinished).toBe(true);
+      expect({
+        ingestions: vi.mocked(mockRetrievalAugmentor.ingestDocuments).mock.calls.length,
+        reflectionChecks: turnGmi.getReasoningTrace().entries.filter(({ type }) => type === 'SELF_REFLECTION_TRIGGERED').length,
+      }).toEqual(stopped ? { ingestions: 0, reflectionChecks: 0 } : { ingestions: 1, reflectionChecks: 1 });
+      if (stopped) {
+        expect(next.value.error).toMatchObject({ message: expect.stringMatching(/abort/i) });
+      } else {
+        expect(next.value.error).toBeUndefined();
+        expect(next.value.responseText).toBe('Mock stream response.');
+      }
+    } finally {
+      await turnGmi.shutdown();
+    }
+  });
+
   it("summarizes a turn with the persona's extractive method", async () => {
     // 'short', the length a persona that names none asks for, is the first two sentences of "User: ...\n\nAssistant: ...".
     expect(await ingestOneTurn({ enabled: true, method: 'extractive' })).toBe('User: The parcel is late. It was due on Monday.');

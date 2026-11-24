@@ -137,25 +137,31 @@ describe('GMI cognitive memory when a turn stops', () => {
     expect(await filed()).toEqual(FILED_EXCHANGE);
   });
 
-  it('finishes filing an exchange if the session closes after its encoding starts', async () => {
+  it.each(['caller abort', 'session close'] as const)('completes a turn when a %s arrives during filing', async (stopBy) => {
     const { session, filed, holdReplyEmbedding } = open();
     const embedding = holdReplyEmbedding();
-    const turn = session.send(USER_TEXT).catch((error: unknown) => error);
+    const stop = new AbortController();
+    const turn = session.send(USER_TEXT, { abortSignal: stop.signal }).catch((error: unknown) => error);
 
     try {
       const first = await Promise.race([embedding.started.then(() => 'embedding'), turn]);
       expect(first).toBe('embedding');
-      // While the reply's embedding is held, neither the close nor the turn ends.
       const ended: string[] = [];
-      const closing = session.close().finally(() => { ended.push('close'); });
+      const closing = stopBy === 'session close'
+        ? session.close().finally(() => { ended.push('close'); })
+        : undefined;
+      if (stopBy === 'caller abort') stop.abort(new Error('Stopped during filing'));
       void turn.then(() => { ended.push('turn'); });
       await new Promise((resolve) => setTimeout(resolve, 50));
       expect(ended).toEqual([]);
       embedding.release();
 
       await closing;
-      expect(await turn).toMatchObject({ message: expect.stringMatching(/abort/i) });
       expect(await filed()).toEqual(FILED_EXCHANGE);
+      expect(await turn).toMatchObject({ text: ASSISTANT_TEXT, usage: expect.objectContaining(STEP_USAGE) });
+      expect(session.messages().at(-1)).toMatchObject({ content: ASSISTANT_TEXT });
+      expect(session.messages().at(-1)).not.toMatchObject({ partial: true });
+      expect(await session.usage()).toMatchObject(STEP_USAGE);
     } finally {
       embedding.release();
     }
