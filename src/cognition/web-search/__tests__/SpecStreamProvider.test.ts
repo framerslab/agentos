@@ -1,11 +1,14 @@
 /**
  * @file SpecStreamProvider.test.ts
  * A SpecStream key the API rejects (401) or an unpaid account (402) is marked in the provider's pool and the search
- * throws, naming the status; the next search sends the other key; a 200 records the key as good and maps sources with
- * excerpts; a pool whose every key is out sends nothing. `fetch` is stubbed; nothing leaves the process.
+ * throws, naming the status; the next search sends the other key; a 200 records the key as good and maps a source's
+ * excerpt to its snippet; a pool whose every key is out sends nothing; registered ahead of Firecrawl, SpecStream leaves
+ * Firecrawl's full page content on the deduplicated result. `fetch` is stubbed; nothing leaves the process.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { SpecStreamProvider } from '../providers/SpecStreamProvider';
+import { FirecrawlProvider } from '../providers/FirecrawlProvider';
+import { WebSearchService } from '../WebSearchService';
 
 const fetchMock = vi.fn();
 
@@ -58,8 +61,7 @@ describe('SpecStreamProvider', () => {
       {
         url: 'https://example.com/a',
         title: 'A',
-        snippet: 'about a',
-        content: 'Full excerpt for a',
+        snippet: 'Full excerpt for a',
       },
     ]);
     expect(keysSent()).toEqual(['ss-alpha-0001', 'ss-beta-0002']);
@@ -110,7 +112,7 @@ describe('SpecStreamProvider', () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
-  it('omits content when excerpt is absent and returns [] when sources are missing', async () => {
+  it('keeps the snippet when excerpt is absent and returns [] when sources are missing', async () => {
     const provider = new SpecStreamProvider('ss-alpha-0001');
     fetchMock.mockResolvedValueOnce(
       answer(200, {
@@ -120,10 +122,30 @@ describe('SpecStreamProvider', () => {
       }),
     );
     expect(await provider.search('b')).toEqual([
-      { url: 'https://example.com/b', title: 'B', snippet: 'about b', content: undefined },
+      { url: 'https://example.com/b', title: 'B', snippet: 'about b' },
     ]);
 
     fetchMock.mockResolvedValueOnce(answer(200, { data: {} }));
     expect(await provider.search('empty')).toEqual([]);
+  });
+
+  it("leaves Firecrawl's full content on a shared URL when registered first", async () => {
+    const firecrawlMarkdown = '# A\n\nThe whole page for a, as Firecrawl extracted it.';
+    fetchMock.mockImplementation(async (url: string) =>
+      String(url).includes('specstream')
+        ? answer(200, found)
+        : answer(200, {
+            success: true,
+            data: [{ url: 'https://example.com/a', title: 'A', description: 'about a', markdown: firecrawlMarkdown }],
+          }),
+    );
+    const service = new WebSearchService();
+    service.registerProvider(new SpecStreamProvider('ss-alpha-0001'));
+    service.registerProvider(new FirecrawlProvider('fc-alpha-0001'));
+
+    const [merged, ...rest] = await service.search('a', { rerank: false });
+    expect(rest).toEqual([]);
+    expect(merged.providerSources).toEqual(['specstream', 'firecrawl']);
+    expect(merged.content).toBe(firecrawlMarkdown);
   });
 });

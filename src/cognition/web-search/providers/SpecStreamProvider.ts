@@ -1,9 +1,9 @@
 /**
  * @module web-search/providers/SpecStreamProvider
  *
- * SpecStream web search provider with extracted page excerpts in one API call.
- * Returns ranked live web results and passage excerpts alongside snippets.
- * Weighted at 1.5x RRF like Firecrawl because results include extracted page text.
+ * SpecStream web search provider. Returns ranked live web results; a passage excerpt, when the API sends one, is used
+ * as the snippet. Full page content is left to providers that extract it (Firecrawl), so a deduplicated result keeps
+ * that content whatever order the providers are registered in.
  */
 import type { IWebSearchProvider, WebSearchResult } from '../types';
 import { ApiKeyPool } from '../../../core/providers/ApiKeyPool.js';
@@ -12,11 +12,12 @@ import { drawSearchKey, settleSearchAnswer } from './searchKeyFailure.js';
 const REQUEST_TIMEOUT_MS = 30_000;
 
 /**
- * Web search provider backed by SpecStream's `/v1/web-search` API, returning ranked results and passage excerpts.
+ * Web search provider backed by SpecStream's `/v1/web-search` API, returning ranked results whose snippet is the
+ * passage excerpt when one is present.
  */
 export class SpecStreamProvider implements IWebSearchProvider {
   readonly providerId = 'specstream' as const;
-  readonly weight = 1.5;
+  readonly weight = 1.0;
 
   private readonly keyPool: ApiKeyPool;
 
@@ -69,8 +70,7 @@ export class SpecStreamProvider implements IWebSearchProvider {
     return sources.map((r) => ({
       url: String(r.url ?? ''),
       title: String(r.title ?? ''),
-      snippet: String(r.snippet ?? ''),
-      content: typeof r.excerpt === 'string' && r.excerpt.length > 0 ? r.excerpt : undefined,
+      snippet: typeof r.excerpt === 'string' && r.excerpt.length > 0 ? r.excerpt : String(r.snippet ?? ''),
     }));
   }
 }
