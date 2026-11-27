@@ -545,6 +545,24 @@ describe('GMI request beside passthrough parameters on a hop whose provider stri
     const built = construct.mock.calls[0][0] as PromptComponents & { reservedTokens?: number };
     expect(built.reservedTokens ?? 0, `the reservation beside ${passthroughTokens} tokens of passthrough parameters`).toBe(toolTokens + (counted ? passthroughTokens : 0));
   });
+  it.each(['groq', 'mistral', 'together', 'xai', 'litellm'])(
+    'on a %s hop, which sends through the OpenAI request builder, the passthrough parameters it keeps are counted',
+    async (providerId) => {
+      const { gateway, sent } = servingGateway(providerId, 'host-model', 32_000, 'Pier 3.');
+      const { gmi, promptEngine } = await createScriptedGmi({ gateway });
+      const construct = vi.spyOn(promptEngine, 'constructPrompt');
+      // A field OpenAI's request keeps, written over the request's top-level fields.
+      const customModelParams = { metadata: { crossing_notes: TIMETABLE_TOOL.description } };
+      await runTurn(gmi, textTurn('t1', 'Which pier does the island ferry leave from?', { options: { customModelParams } } as never));
+      expect(sent).toHaveLength(1);
+      const passthroughTokens = await promptEngine.estimateTokenCount(JSON.stringify(customModelParams), 'host-model');
+      expect(passthroughTokens).toBeGreaterThan(7_300);
+      const tools = sent[0].options.tools;
+      const toolTokens = Array.isArray(tools) && tools.length > 0 ? await promptEngine.estimateTokenCount(JSON.stringify(tools), 'host-model') : 0;
+      const built = construct.mock.calls[0][0] as PromptComponents & { reservedTokens?: number };
+      expect(built.reservedTokens ?? 0, `the reservation beside ${passthroughTokens} tokens of passthrough parameters`).toBe(toolTokens + passthroughTokens);
+    },
+  );
 });
 
 describe('GMI request beside a response format a host gateway forwards on a response-schema turn', () => {

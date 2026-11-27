@@ -217,3 +217,48 @@ describe('PromptEngine reservedTokens', () => {
     expect(await count({ ...components, reservedTokens: value })).toBe(await count(components));
   });
 });
+
+describe("PromptEngine's history count of tool calls, by what the template sends", () => {
+  let engine: PromptEngine;
+  beforeEach(async () => {
+    engine = new PromptEngine();
+    await engine.initialize({
+      defaultTemplateName: 'openai_chat',
+      availableTemplates: {},
+      tokenCounting: { strategy: 'estimated' },
+      historyManagement: { defaultMaxMessages: 10, maxTokensForHistory: 2048, summarizationTriggerRatio: 0.8, preserveImportantMessages: true },
+      contextManagement: { maxRAGContextTokens: 2048, summarizationQualityTier: 'balanced', preserveSourceAttributionInSummary: true },
+      contextualElementSelection: { maxElementsPerType: {}, defaultMaxElementsPerType: 3, priorityResolutionStrategy: 'highest_first', conflictResolutionStrategy: 'skip_conflicting' },
+      performance: { enableCaching: false, cacheTimeoutSeconds: 60 },
+    });
+  });
+
+  /** Four earlier tool rounds whose calls carry about 2,500 tokens of arguments each, over the 1,400-token history share. */
+  const ROUNDS = Array.from({ length: 4 }, (_, i) => [
+    { role: 'user', content: `Earlier crossing question ${i}: log the crossing.` },
+    { role: 'assistant', content: null, tool_calls: [{ id: `call-${i}`, name: 'log_crossing', arguments: { crossing: i, log: 'x'.repeat(10_000) } }] },
+    { role: 'tool', tool_call_id: `call-${i}`, content: `Logged crossing ${i}.` },
+    { role: 'assistant', content: `Crossing ${i} is logged.` },
+  ]).flat();
+
+  it.each([
+    { template: 'openai_chat', sendsCalls: true },
+    { template: 'anthropic_messages', sendsCalls: false },
+    { template: 'generic_completion', sendsCalls: false },
+  ])('the $template template: the calls are counted only where it sends them', async ({ template, sendsCalls }) => {
+    const model: ModelTargetInfo = { ...MODEL, promptFormatType: template as ModelTargetInfo['promptFormatType'] };
+    const built = await engine.constructPrompt({ ...base, conversationHistory: ROUNDS } as never, model, executionContext);
+    const text = JSON.stringify(built.prompt);
+    // The newest round is kept either way.
+    expect(text).toContain('Crossing 3 is logged.');
+    if (sendsCalls) {
+      // The arguments are sent, so the oldest rounds are left out to fit the history's share.
+      expect(text).not.toContain('Crossing 0 is logged.');
+      expect(built.modificationDetails?.historyOmitted?.messages).toBeGreaterThan(0);
+    } else {
+      // The template sends no calls, so the history's text, a few dozen tokens, fits its share whole.
+      expect(text, 'the oldest round, which fits the share as the template sends it').toContain('Crossing 0 is logged.');
+      expect(built.modificationDetails?.historyOmitted).toBeUndefined();
+    }
+  });
+});
