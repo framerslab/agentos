@@ -680,7 +680,7 @@ describe("agent({ runtime: 'gmi' }) earlier history beside what a request carrie
     ids.next = 0;
     const WINDOW = 8_000;
     const answer = '{"pier":"Pier 3"}';
-    const turn = withSchema ? { responseSchema: longSchema(), schemaName: 'crossing_report' } : undefined;
+    const schema = longSchema();
     const k = key(); const emb = key();
     const s = script('openai', k, { window: WINDOW, replies: [...STATEMENTS.map(() => reply.text('Noted.')), reply.text(answer), reply.text(answer)] });
     script('openai', emb, { replies: [] });
@@ -688,12 +688,14 @@ describe("agent({ runtime: 'gmi' }) earlier history beside what a request carrie
     const a = withTool(k, timetableTool(60));
     try {
       const session = a.session('s');
+      /** Asks with the response schema, or without one. */
+      const send = (text: string) => (withSchema ? session.send(text, { responseSchema: schema, schemaName: 'crossing_report' }) : session.send(text));
       for (const statement of STATEMENTS) await session.send(statement);
       // The tool's schema travels beside the prompt of a request with no response schema.
       expect(besideOf(s, 0).tools, 'the tool schemas of a request').toBeGreaterThan(1_200);
       // A short question first, to read what the request carries: its system text, and what travels beside its prompt.
       session.clear();
-      await session.send(QUESTION, turn);
+      await send(QUESTION);
       const first = besideOf(s, STATEMENTS.length);
       if (withSchema) expect(first.payload, 'the schema payload of the request').toBeGreaterThan(1_500);
       expect(first.tools + first.payload, 'what the request carries beside its prompt').toBeGreaterThan(1_200);
@@ -707,7 +709,8 @@ describe("agent({ runtime: 'gmi' }) earlier history beside what a request carrie
       session.clear();
       session.reseed(EARLIER as never);
       logged.length = 0;
-      const result = await session.send(question, turn);
+      // Both results carry the turn's recall record and what its request left out of the history.
+      const result = (await send(question)) as { memoryRecall?: MemoryRecallCapture; historyOmitted?: { messages: number; tokens: number } };
 
       const call = STATEMENTS.length + 1;
       const request = s.seen[call];
