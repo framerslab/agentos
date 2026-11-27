@@ -210,13 +210,13 @@ export class AgentMemory {
   /**
    * Store information in long-term memory.
    *
-   * @example
-   * await memory.remember("User prefers dark mode");
-   * await memory.remember("Deploy by Friday", { type: 'prospective', tags: ['deadline'] });
-   *
    * The `ExtractionCallOptions` fields of `options` (`inputKind`, `turnId`, `role`,
    * `subjectId`, `extraction`) are reserved for the conversational extraction pipeline
    * and have no effect in this release: this method does not forward them.
+   *
+   * @example
+   * await memory.remember("User prefers dark mode");
+   * await memory.remember("Deploy by Friday", { type: 'prospective', tags: ['deadline'] });
    */
   async remember(
     content: string,
@@ -313,13 +313,13 @@ export class AgentMemory {
    * Feed a conversation turn to the observational memory system.
    * The Observer creates dense notes when the token threshold is reached.
    *
-   * @example
-   * await memory.observe('user', "Can you help me debug this?");
-   * await memory.observe('assistant', "Sure! The issue is in your useEffect...");
-   *
    * The `ExtractionObservationOptions` fields of `options` (`inputKind`, `turnId`,
    * `subjectId`, `extraction`, `scope`, `scopeId`) are reserved for the conversational
    * extraction pipeline and have no effect in this release: this method does not forward them.
+   *
+   * @example
+   * await memory.observe('user', "Can you help me debug this?");
+   * await memory.observe('assistant', "Sure! The issue is in your useEffect...");
    */
   async observe(
     role: ExtractionRole,
