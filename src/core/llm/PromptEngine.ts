@@ -215,7 +215,7 @@ function hostNoteAsSent(note: string, components: Readonly<PromptComponents>): s
  * step's parts holds it (a host note is counted with its own frame, {@link hostNoteAsSent}), so the budget step takes
  * it off the budget the prompt is held to, as `estimateFixedPromptTokens` counts it among the fixed parts.
  *
- * @param components - The prompt's components, before the budget step.
+ * @param components - The prompt's components: before the budget step, or as it has reduced them.
  * @returns The text to count; '' when the prompt has a host note, or neither a memory block nor other retrieved text.
  */
 function noteFrameAsSent(components: Readonly<PromptComponents>): string {
@@ -1114,6 +1114,21 @@ export class PromptEngine implements IPromptEngine {
     return undefined;
   }
 
+  /**
+   * What a prompt itself may hold on a model: the model's budget (`optimalContextTokens`, else `maxContextTokens`)
+   * less what the request carries beside the prompt (`reservedTokens`) and less the frame line the prompt's note opens
+   * with where no part's count holds it ({@link noteFrameAsSent}).
+   *
+   * @param components - The prompt's components: before the budget step, or as it has reduced them.
+   * @param modelInfo - The model the prompt is built for.
+   * @returns The tokens the prompt may hold; never below 0.
+   */
+  private async promptBudgetOf(components: Readonly<PromptComponents>, modelInfo: Readonly<ModelTargetInfo>): Promise<number> {
+    const budget = modelInfo.optimalContextTokens || modelInfo.maxContextTokens;
+    const frameTokens = await this.estimateTokenCount(noteFrameAsSent(components), modelInfo.modelId);
+    return Math.max(0, budget - reservedTokensOf(components) - frameTokens);
+  }
+
   private async applyTokenBudget(
     components: PromptComponents,
     modelInfo: Readonly<ModelTargetInfo>,
@@ -1129,8 +1144,8 @@ export class PromptEngine implements IPromptEngine {
      *  - system: 20%, user: 15%, history: 35%, rag: 20%, tools: 10%
      * Summarization: Uses UtilityAI if available & trigger ratio exceeded; else truncation fallback.
      * Memory: `memoryContextText` counts toward the prompt and the rag share and is never reduced; the rag share's
-     *  reduction falls on `retrievedContext` alone, to what the share leaves beside the memory block (less the
-     *  prompt's overrun), and a target of 0 removes it.
+     *  reduction falls on `retrievedContext` alone, to the smaller of what the share leaves beside the memory block
+     *  and what it holds less the prompt's overrun, and a target of 0 removes it.
      * Host note: `applicationNote` counts toward the prompt with the user's message, outside the rag share, and is never
      *  reduced; a prompt over the budget after the reductions goes out with it whole, with the
      *  `TOKEN_BUDGET_EXCEEDED_POST_OPT` warning.
@@ -1138,7 +1153,8 @@ export class PromptEngine implements IPromptEngine {
      *  tool schemas, a response schema's payload, a message the caller adds after the build) and less the frame line
      *  a prompt with no host note opens its memory block or retrieved text with, which no part's count holds. The
      *  earlier history and `retrievedContext` are reduced to fit what is left; the shares above stay shares of the
-     *  model's whole budget.
+     *  model's whole budget. The over-budget warning compares the prompt as reduced with its budget as sent: a prompt
+     *  whose retrieved text was removed, with no memory block and no host note, sends no note and no frame line.
      * Failure Handling: On summarization errors pushes warning issue & falls back to truncation.
      * Returns cloned optimized components plus modification descriptors for telemetry.
      */
@@ -1152,7 +1168,7 @@ export class PromptEngine implements IPromptEngine {
     // What the prompt itself may hold: the budget less what the request carries beside it, and less the note's frame
     // line where no part's count holds it.
     const reservedTokens = reservedTokensOf(optimized);
-    const promptBudget = Math.max(0, budget - reservedTokens - await this.estimateTokenCount(noteFrameAsSent(optimized), modelInfo.modelId));
+    const promptBudget = await this.promptBudgetOf(optimized, modelInfo);
     const sendsThinking = this.thinkingSentFor(optimized.conversationHistory, modelInfo);
     let currentTokens = await this.calculateTotalTokens(optimized, modelInfo.modelId, sendsThinking);
     modifications.details!.originalEstimatedTokenCount = currentTokens;
@@ -1250,9 +1266,10 @@ export class PromptEngine implements IPromptEngine {
       let ragTokens = await this.estimateTokenCount(contextStr, modelInfo.modelId);
       otherBefore = ragTokens;
       if (ragTokens + memoryTokens > budgets.rag || currentTokens > promptBudget) {
-        // What the other context may keep: the share less the memory block, less the overrun when the prompt is over
-        // its budget.
-        const target = Math.max(0, Math.floor(budgets.rag - memoryTokens - Math.max(0, currentTokens - promptBudget)));
+        // What the other context may keep: the share less the memory block, and, when the prompt is over its budget,
+        // no more than the context holds less the overrun, so that context under its share still gives the overrun up.
+        const overrun = Math.max(0, currentTokens - promptBudget);
+        const target = Math.max(0, Math.floor(Math.min(budgets.rag - memoryTokens, ragTokens - overrun)));
         // A target the other context already fits leaves it as it is: nothing is cut, summarised or reported cut.
         if (target < ragTokens) {
           const retrievedBefore = optimized.retrievedContext;
@@ -1304,9 +1321,12 @@ export class PromptEngine implements IPromptEngine {
       otherAfter = ragTokens;
     }
 
-    if (currentTokens > promptBudget && issues) {
+    // The budget as the reduced prompt is sent: one whose retrieved text was removed, with no memory block and no host
+    // note, sends no note, so no frame line comes off it.
+    const sentBudget = await this.promptBudgetOf(optimized, modelInfo);
+    if (currentTokens > sentBudget && issues) {
       const reservedNote = reservedTokens > 0 ? `; ${reservedTokens} of the model's ${budget} tokens are reserved for what the request carries beside the prompt` : '';
-      issues.push({ type: 'warning', code: 'TOKEN_BUDGET_EXCEEDED_POST_OPT', message: `Prompt still exceeds budget (${currentTokens}/${promptBudget}${reservedNote}) after initial optimizations. Quality may be affected.`});
+      issues.push({ type: 'warning', code: 'TOKEN_BUDGET_EXCEEDED_POST_OPT', message: `Prompt still exceeds budget (${currentTokens}/${sentBudget}${reservedNote}) after initial optimizations. Quality may be affected.`});
     }
 
     return { optimizedComponents: optimized, modifications, contextTokens: { memory: memoryTokens, otherBefore, otherAfter } };
