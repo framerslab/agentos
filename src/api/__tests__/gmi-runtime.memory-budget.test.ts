@@ -549,3 +549,76 @@ describe("agent({ runtime: 'gmi' }) memory budget beside a response schema the p
     }
   });
 });
+
+describe("agent({ runtime: 'gmi' }) memory budget beside a response schema the request's payload carries", () => {
+  it("the schema's payload is one of the request's fixed parts: the block is sized beside it, and the request fits the model's context", async () => {
+    ids.next = 0;
+    const WINDOW = 8_000;
+    // On this model id PromptEngine counts four characters a token, as the assembler does.
+    const engineTokensOf = (text: string) => Math.ceil(text.length / 4);
+    // OpenAI takes this schema as a strict `json_schema` payload, so no message of the prompt carries it: it travels
+    // beside the prompt, as tool schemas do. A hundred named fields make that payload a long one.
+    const logShape: Record<string, z.ZodOptional<z.ZodString>> = {};
+    for (let i = 0; i < 100; i += 1) logShape[`harbor_log_entry_for_crossing_${i}`] = z.string().optional();
+    const schema = z.object({ pier: z.string() }).extend(logShape);
+    const answer = '{"pier":"Pier 3"}';
+    const k = key(); const emb = key();
+    const s = script('openai', k, { window: WINDOW, replies: [...STATEMENTS.map(() => reply.text('Noted.')), reply.text(answer), reply.text(answer)] });
+    script('openai', emb, { replies: [] });
+    vi.stubEnv('OPENAI_API_KEY', emb);
+    const a = withRecall(k);
+    /** The schema payload of a request, as the provider received it, and PromptEngine's estimate of its JSON. */
+    const payloadOf = (call: number) => {
+      const format = s.seen[call]?.options.responseFormat as { type?: string } | undefined;
+      return { format, tokens: format ? engineTokensOf(JSON.stringify(format)) : 0 };
+    };
+    try {
+      const session = a.session('s');
+      for (const statement of STATEMENTS) await session.send(statement);
+      // A short question first, to read how many tokens the system text and the schema's payload take.
+      session.clear();
+      await session.send(QUESTION, { responseSchema: schema, schemaName: 'crossing_report' });
+      const first = payloadOf(STATEMENTS.length);
+      expect(first.format, 'the schema payload of the request').toMatchObject({ type: 'json_schema' });
+      expect(JSON.stringify(first.format)).toContain('harbor_log_entry_for_crossing_99');
+      expect(first.tokens, 'the schema payload').toBeGreaterThan(1_500);
+      const systemTokens = engineTokensOf(systemTextOf(s.seen[STATEMENTS.length].messages));
+      expect(systemTokens + first.tokens).toBeLessThan(WINDOW - 2_000);
+
+      // A question that, with that system text and that payload, leaves about 700 tokens of the model's context: less
+      // than the 1,600 its retrieved-context share holds, and less than the block the twelve notes fill.
+      const filler = Array.from({ length: 400 }, (_, i) => `Background paragraph ${i}: the island ferry leaves its pier and the ticket desk opens before each crossing.`).join(' ');
+      const question = `${QUESTION} ${filler}`.slice(0, (WINDOW - systemTokens - first.tokens - 700) * 4);
+      session.clear();
+      logged.length = 0;
+      const result = await session.send(question, { responseSchema: schema, schemaName: 'crossing_report' });
+      expect(result.object).toEqual({ pier: 'Pier 3' });
+
+      // The request the model received fits its context: each text it carries and the schema's payload, by
+      // PromptEngine's estimate.
+      const request = s.seen[STATEMENTS.length + 1];
+      expect(request, 'the question reached the model').toBeDefined();
+      const payload = payloadOf(STATEMENTS.length + 1);
+      expect(payload.format).toEqual(first.format);
+      const block = memoryBlockOf(s, STATEMENTS.length + 1);
+      const texts = request.messages.flatMap(textPartsOf).reduce((sum, text) => sum + engineTokensOf(text), 0);
+      const budget = result.memoryRecall!.budget;
+      expect(
+        texts + payload.tokens,
+        `the request: ${texts} tokens of text, its memory block ${engineTokensOf(block)} of them, and a schema payload of ${payload.tokens}; the fixed parts were counted as ${budget.fixedPromptTokens}`,
+      ).toBeLessThanOrEqual(WINDOW);
+
+      // The record counts the payload among the fixed parts, and the block's budget is what they leave.
+      expect(budget).toMatchObject({ requested: DEFAULT_RECALL_BUDGET_TOKENS, clampReason: 'fixed_prompt', promptShareTokens: 1600, otherContextTokens: 0, hop: 0, reassembled: true });
+      expect(budget.fixedPromptTokens).toBeGreaterThanOrEqual(engineTokensOf(systemTextOf(request.messages)) + engineTokensOf(question) + payload.tokens);
+      expect(budget.effective).toBe(WINDOW - budget.fixedPromptTokens!);
+      // PromptEngine counts this model id's tokens as the assembler does, so the bound is not divided.
+      expect(budget.blockTokenRate).toBeUndefined();
+      expect(budget.effective).toBeGreaterThan(0);
+      expect(tokensOf(block)).toBeLessThanOrEqual(budget.effective);
+      expect(events('memory.recall.budget_clamped')).toEqual([expect.objectContaining({ requested: DEFAULT_RECALL_BUDGET_TOKENS, hop: 0, reason: 'fixed_prompt' })]);
+    } finally {
+      await a.close();
+    }
+  });
+});
