@@ -238,10 +238,17 @@ const unavailable = (): ForgottenLedgerError =>
     'ForgottenLedger: the ledger needs a storage adapter with transactions and a secure random source (globalThis.crypto.getRandomValues); no row was changed.',
   );
 
-const lockNotTaken = (): ForgottenLedgerError =>
+/** The side of a ledger a transaction runs on: the store's database, or its copy. */
+type SideName = 'store' | 'copy';
+
+/**
+ * A side's write lock that another connection held. The message says what that side's transaction did and nothing of
+ * the other side: a step writes the copy before the store, so a store that refuses can follow a copy that committed.
+ */
+const lockNotTaken = (side: SideName): ForgottenLedgerError =>
   new ForgottenLedgerError(
     'LEDGER_UNAVAILABLE',
-    "ForgottenLedger: the ledger table's write lock was not taken; another connection held it. No row was changed.",
+    `ForgottenLedger: the ${side}'s write lock on the ledger table was not taken; another connection held it. The ${side}'s transaction wrote nothing; the call can be made again.`,
   );
 
 /** Writes the one line of a refusal, where the refusal is thrown; callers pass the error on without another line. */
@@ -342,13 +349,14 @@ function nextMark(previous: string | undefined): string {
  * Runs one side's step in a transaction of its own whose first statement takes the table's write lock, so no other
  * writer changes the side between the step's reads and its commit. Every statement of the step runs on `trx`. A
  * step never opens the other side's transaction. A lock that is not taken (another connection holds it past the
- * wait the driver allows) is a `LEDGER_UNAVAILABLE` refusal, and the transaction ends with nothing written. A driver
+ * wait the driver allows) is a `LEDGER_UNAVAILABLE` refusal whose message names `side`, and that side's transaction
+ * ends with nothing written; a transaction of the other side that committed before it keeps what it wrote. A driver
  * that takes the write lock at its BEGIN (the better-sqlite3 adapter begins with BEGIN IMMEDIATE) refuses there,
  * before the step's first statement; that refusal is the same `LEDGER_UNAVAILABLE`, and an error the step throws
  * passes on unchanged. On a PostgreSQL adapter a souled agent keeps its store on, the transaction goes through the
  * adapter's lock (`withAdapterTransactionLock`), as the store's own transactions do.
  */
-function locked<T>(adapter: StorageAdapter, step: (trx: StorageAdapter) => Promise<T>): Promise<T> {
+function locked<T>(side: SideName, adapter: StorageAdapter, step: (trx: StorageAdapter) => Promise<T>): Promise<T> {
   // On a souled agent's PostgreSQL store adapter, the transaction waits for the ones opened earlier on the same object.
   return withAdapterTransactionLock(adapter, async () => {
     let begun = false;
@@ -358,12 +366,12 @@ function locked<T>(adapter: StorageAdapter, step: (trx: StorageAdapter) => Promi
         try {
           await trx.run(adapter.kind.includes('postgres') ? LOCK_POSTGRES : LOCK_SQLITE);
         } catch {
-          throw lockNotTaken();
+          throw lockNotTaken(side);
         }
         return step(trx);
       });
     } catch (error) {
-      if (!begun && isSqliteLockRefusal(error)) throw lockNotTaken();
+      if (!begun && isSqliteLockRefusal(error)) throw lockNotTaken(side);
       throw error;
     }
   });
@@ -473,8 +481,9 @@ export class ForgottenLedger {
    *   side without an identity holds a tombstone or key marker the other lacks; `LEDGER_STATE_INVALID` when a side
    *   holds one of the two rows without the other, a malformed one, or a tombstone the other side holds with another
    *   namespace or time; `LEDGER_UNAVAILABLE` when an adapter has no transactions, the runtime has no secure random
-   *   source, or a side's write lock is held by another connection past the driver's wait. Nothing is copied or marked by an open that is refused, and each refusal writes one
-   *   `memory.ledger_refused` line.
+   *   source, or a side's write lock is held by another connection past the driver's wait (the message names that
+   *   side). Nothing is copied or marked by an open refused before the copy's transaction commits; one refused at the
+   *   store's write lock keeps what the copy's transaction wrote. Each refusal writes one `memory.ledger_refused` line.
    */
   static async open(options: ForgottenLedgerOptions): Promise<ForgottenLedger> {
     try {
@@ -572,7 +581,7 @@ export class ForgottenLedger {
       this.identity = store.identity ?? (await this.writeStore({ rows: [] })).identity;
       return;
     }
-    const plan = await locked(copy, async (trx) => {
+    const plan = await locked('copy', copy, async (trx) => {
       const held = sideOf(await ForgottenLedger.rowsOf(trx));
       checkAgreement(store, held);
       const storePaired = store.rows.has(COPY_MARKER);
@@ -637,7 +646,7 @@ export class ForgottenLedger {
     own?: string;
     named?: boolean;
   }): Promise<{ identity: string; mark: string }> {
-    const done = await locked(this.primary, async (trx) => {
+    const done = await locked('store', this.primary, async (trx) => {
       const held = sideOf(await ForgottenLedger.rowsOf(trx));
       if (step.named) await this.checkHeld(held);
       if (held.identity !== undefined && step.identity !== undefined && held.identity !== step.identity) throw identityMismatch();
@@ -722,7 +731,7 @@ export class ForgottenLedger {
     /** The rows a write adds, the key's marker first. */
     const added = (): LedgerRow[] => (write ? [...(write.marker ? [write.marker] : []), ...(write.tombstone ? [write.tombstone] : [])] : []);
     if (!copy) {
-      return locked(this.primary, async (trx) => {
+      return locked('store', this.primary, async (trx) => {
         const held = sideOf(await ForgottenLedger.rowsOf(trx));
         await this.checkHeld(held);
         let written = false;
@@ -741,7 +750,7 @@ export class ForgottenLedger {
     }
     const store = sideOf(await ForgottenLedger.rowsOf(this.primary));
     await this.checkHeld(store);
-    const plan = await locked(copy, async (trx) => {
+    const plan = await locked('copy', copy, async (trx) => {
       const held = sideOf(await ForgottenLedger.rowsOf(trx));
       await this.checkHeld(held);
       checkAgreement(store, held);
@@ -791,7 +800,10 @@ export class ForgottenLedger {
    * @throws {TypeError} For a subject with another kind or no id, or a key that is not a non-empty string.
    * @throws {ForgottenLedgerError} `LEDGER_IDENTITY_MISMATCH` when a side no longer holds the ledger's identity,
    *   `LEDGER_STATE_INVALID` when a side's identity or state row is damaged, `KEY_REQUIRED` for a key marker of a key
-   *   the handle was not given; nothing is written.
+   *   the handle was not given; nothing is written. `LEDGER_UNAVAILABLE` when a side's write lock is held by another
+   *   connection past the driver's wait: the message names that side, whose transaction wrote nothing. A refusal of the
+   *   store comes after the copy's transaction committed, so the copy holds the tombstone (and `isForgotten` reads
+   *   it) while the store does not; the call can be made again, and `reconcile()` copies it to the store.
    */
   async markForgotten(
     subject: SuppressionSubject,
@@ -859,14 +871,14 @@ export class ForgottenLedger {
     const copy = this.copy;
     await this.step(async () => {
       if (copy) {
-        await locked(copy, async (trx) => {
+        await locked('copy', copy, async (trx) => {
           if (keep) await this.refuseKeptOfForgotten(trx, keep);
           await write(trx);
           await deleteKept(trx, 'trace_id', ids);
           if (keep) await trx.run(KEEP_CORRECTION, [keep.traceId, keep.scopeId, keep.text, Math.trunc(keep.createdAt)]);
         });
       }
-      await locked(this.primary, write);
+      await locked('store', this.primary, write);
     });
   }
 
@@ -906,7 +918,7 @@ export class ForgottenLedger {
     const copy = this.copy;
     if (!copy) return;
     await this.step(() =>
-      locked(copy, async (trx) => {
+      locked('copy', copy, async (trx) => {
         await this.checkHeld(sideOf(await ForgottenLedger.rowsOf(trx)));
         await this.refuseKeptOfForgotten(trx, { traceId, scopeId, text, createdAt });
         await trx.run(KEEP_CORRECTION, [traceId, scopeId, text, Math.trunc(createdAt)]);
@@ -944,7 +956,7 @@ export class ForgottenLedger {
     const copy = this.copy;
     if (!copy || ids.length === 0) return 0;
     return this.step(() =>
-      locked(copy, async (trx) => {
+      locked('copy', copy, async (trx) => {
         await this.checkHeld(sideOf(await ForgottenLedger.rowsOf(trx)));
         return deleteKept(trx, 'trace_id', ids);
       }),
@@ -1086,13 +1098,13 @@ export class ForgottenLedger {
    */
   private async uniteDeletedTraces(copy: StorageAdapter): Promise<void> {
     const ofStore = await ForgottenLedger.deletedTraceRowsOf(this.primary);
-    const ofCopy = await locked(copy, async (trx) => {
+    const ofCopy = await locked('copy', copy, async (trx) => {
       await this.checkHeld(sideOf(await ForgottenLedger.rowsOf(trx)));
       const held = await ForgottenLedger.deletedTraceRowsOf(trx);
       for (const [hash, row] of ofStore) if (!held.has(hash)) await ForgottenLedger.insert(trx, row);
       return held;
     });
-    await locked(this.primary, async (trx) => {
+    await locked('store', this.primary, async (trx) => {
       await this.checkHeld(sideOf(await ForgottenLedger.rowsOf(trx)));
       const held = await ForgottenLedger.deletedTraceRowsOf(trx);
       for (const [hash, row] of ofCopy) if (!held.has(hash)) await ForgottenLedger.insert(trx, row);
