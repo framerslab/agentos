@@ -567,6 +567,7 @@ describe('the forgotten-user ledger', () => {
 
     expect(refused).toBeInstanceOf(ForgottenLedgerError);
     expect(refused).toMatchObject({ name: 'ForgottenLedgerError', code: 'LEDGER_UNAVAILABLE' });
+    expect((refused as Error).message).toMatch(/the copy's transaction wrote nothing/i);
     expect(refusals()).toEqual([expect.objectContaining({ type: 'ForgottenLedgerError', code: 'LEDGER_UNAVAILABLE' })]);
     expect(await tombstonesOf(pair.primary)).toEqual([]);
     expect(await tombstonesOf(pair.copy)).toEqual([]);
