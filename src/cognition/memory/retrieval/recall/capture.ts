@@ -124,9 +124,10 @@ export interface MemoryRecallCapture {
     /** The turn's RAG and long-term-memory text, in tokens, which the share holds first (a GMI turn's record). */
     otherContextTokens?: number;
     /**
-     * The parts of the hop's prompt that are never reduced, in tokens, as the prompt engine counts them: the system
-     * prompt, the current turn's messages, the host's note and the tool schemas (a GMI turn's record, on a prompt
-     * engine that counts them). The block's budget is never above the model's context less this.
+     * The parts of the hop's request that are never reduced, in tokens, as the prompt engine counts them: the system
+     * prompt, the current turn's messages, the host's note, the tool schemas and the turn's response schema as the
+     * hop carries it, its instruction in the prompt or its payload beside it (a GMI turn's record, on a prompt engine
+     * that counts them). The block's budget is never above the model's context less this.
      */
     fixedPromptTokens?: number;
     /**

@@ -1113,18 +1113,42 @@ export class GMI implements IGMI {
   }
 
   /**
+   * The provider payload a hop's request carries the turn's response schema in: the gateway's, where the hop's
+   * provider and model take the schema as a request parameter. It is sent whether or not the system prompt holds the
+   * schema's instruction too.
+   *
+   * @param resolution - The hop, when a completion gateway resolved one.
+   * @param responseSchema - The turn's response schema, when it has one.
+   * @param schemaName - The schema's name.
+   * @returns The payload; undefined when the hop's request carries the schema in none.
+   * @throws Whatever the gateway's lowering of the schema throws.
+   */
+  private schemaPayloadFor(
+    resolution: CompletionResolution | null,
+    responseSchema: ZodType | undefined,
+    schemaName: string | undefined,
+  ): Record<string, unknown> | undefined {
+    const gateway = this.config.completionGateway;
+    if (!gateway || !resolution || !responseSchema) return undefined;
+    return gateway.schemaPayload?.(resolution, responseSchema, schemaName);
+  }
+
+  /**
    * The parts of a hop's request that nothing reduces to fit the model, counted for the memory block's budget
    * ({@link effectiveRecallBudget}): the prompt's fixed parts as the prompt engine counts them
    * (`estimateFixedPromptTokens`: the system prompts, the current turn's messages, the host's note), the tool schemas
-   * the request carries beside the prompt, as the engine's estimate of their JSON, and the response schema's
-   * instruction when the hop's prompt carries the schema. With them, how many tokens the engine counts for one of the
-   * block's own on this model: the block is rendered in the assembler's tokens, which the engine can count as more.
+   * the turn offers beside the prompt, as the engine's estimate of their JSON, and the turn's response schema as the
+   * hop carries it: its instruction when the hop's prompt carries the schema, and its payload, as the engine's
+   * estimate of its JSON, when the hop's request carries the schema as a parameter. With them, how many tokens the
+   * engine counts for one of the block's own on this model: the block is rendered in the assembler's tokens, which the
+   * engine can count as more.
    *
    * @param components - The turn's prompt components, without the hop's memory block.
    * @param modelTargetInfo - The hop's model.
    * @param executionContext - The turn's prompt execution context.
-   * @param tools - The tool schemas the request carries.
+   * @param tools - The tool schemas the turn offers.
    * @param schemaInstruction - The response schema's instruction the hop's prompt is sent with, when it has one.
+   * @param schemaPayload - The provider payload the hop's request carries the response schema in, when it has one.
    * @returns The count and the rate; undefined when the engine has no `estimateFixedPromptTokens`, or its count failed
    *   or was not a finite number of at least 0 (one reasoning-trace warning), so the block is sized by the prompt
    *   share alone.
@@ -1135,6 +1159,7 @@ export class GMI implements IGMI {
     executionContext: PromptExecutionContext,
     tools: ModelCompletionOptions['tools'],
     schemaInstruction: string | undefined,
+    schemaPayload: Record<string, unknown> | undefined,
   ): Promise<{ fixedPromptTokens: number; blockTokenRate: number } | undefined> {
     const engine = this.promptEngine;
     if (typeof engine.estimateFixedPromptTokens !== 'function') return undefined;
@@ -1143,7 +1168,9 @@ export class GMI implements IGMI {
       const promptTokens = await engine.estimateFixedPromptTokens(components, modelTargetInfo, executionContext);
       const toolSchemaTokens = tools && tools.length > 0 ? await engine.estimateTokenCount(JSON.stringify(tools), modelId) : 0;
       const schemaInstructionTokens = schemaInstruction ? await engine.estimateTokenCount(schemaInstruction, modelId) : 0;
-      const fixedPromptTokens = promptTokens + toolSchemaTokens + schemaInstructionTokens;
+      // The payload is sent beside the prompt, as the tool schemas are, and is counted as they are.
+      const schemaPayloadTokens = schemaPayload ? await engine.estimateTokenCount(JSON.stringify(schemaPayload), modelId) : 0;
+      const fixedPromptTokens = promptTokens + toolSchemaTokens + schemaInstructionTokens + schemaPayloadTokens;
       const blockTokenRate = (await engine.estimateTokenCount(BLOCK_TOKEN_RATE_PROBE, modelId)) / estimateMemoryTokens(BLOCK_TOKEN_RATE_PROBE);
       if (typeof fixedPromptTokens === 'number' && Number.isFinite(fixedPromptTokens) && fixedPromptTokens >= 0) {
         return { fixedPromptTokens, blockTokenRate };
@@ -2454,7 +2481,16 @@ export class GMI implements IGMI {
             } catch {
               hopSchemaInstruction = undefined;
             }
-            const fixedParts = await this.fixedPromptPartsOf(promptComponents, modelTargetInfo, promptExecContext, llmOptions.tools, hopSchemaInstruction);
+            // So is the schema's payload, where this hop's request carries the schema as a parameter: it is sent beside
+            // the prompt, as the tool schemas are. A lowering that throws here throws again in the gateway, where the
+            // payload is built for the request.
+            let hopSchemaPayload: Record<string, unknown> | undefined;
+            try {
+              hopSchemaPayload = this.schemaPayloadFor(resolution, responseSchema, schemaName);
+            } catch {
+              hopSchemaPayload = undefined;
+            }
+            const fixedParts = await this.fixedPromptPartsOf(promptComponents, modelTargetInfo, promptExecContext, llmOptions.tools, hopSchemaInstruction, hopSchemaPayload);
             const hopBudget = effectiveRecallBudget({
               totalTokens: this.memoryBridge.budgetTokens(),
               contextTokens: modelTargetInfo.optimalContextTokens || modelTargetInfo.maxContextTokens,
