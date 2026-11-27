@@ -343,8 +343,9 @@ function stageOptions<T>(setting: boolean | T | undefined): T | undefined {
   return setting && typeof setting === 'object' ? setting : undefined;
 }
 
-function modelLimit(value: number | undefined, fallback: number): number {
-  return value !== undefined && Number.isSafeInteger(value) && value >= 0 ? value : fallback;
+/** A limit counts only as a non-negative safe integer. Any other value is treated as unset. */
+function validLimit(value: number | undefined): number | undefined {
+  return value !== undefined && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
 }
 
 /**
@@ -399,8 +400,12 @@ export function resolveExtractionPolicy(
 
   const runtimeOptions = stageOptions(runtime.extraction);
   const personaOptions = stageOptions(persona.extraction);
-  const maxCallsPerTurn = modelLimit(runtimeOptions?.maxCallsPerTurn ?? personaOptions?.maxCallsPerTurn, 2);
-  const timeoutMs = modelLimit(runtimeOptions?.timeoutMs ?? personaOptions?.timeoutMs, 3000);
+  // Each level is validated before the levels are compared, so an invalid runtime limit
+  // cannot displace a valid persona limit (a persona's zero would otherwise become the default).
+  const maxCallsPerTurn = validLimit(runtimeOptions?.maxCallsPerTurn) ??
+    validLimit(personaOptions?.maxCallsPerTurn) ?? 2;
+  const timeoutMs = validLimit(runtimeOptions?.timeoutMs) ??
+    validLimit(personaOptions?.timeoutMs) ?? 3000;
   const allowModel = (runtimeOptions?.mode ?? personaOptions?.mode) !== 'classical' &&
     host.allowExternalProcessing !== false &&
     call.role !== 'assistant' &&
