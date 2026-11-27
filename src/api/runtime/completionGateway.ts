@@ -295,6 +295,18 @@ export interface CompletionGateway {
    * format is counted.
    */
   responseFormatReplacedWithSchema?(resolution: CompletionResolution): boolean;
+  /**
+   * Whether `stream()` hands a hop's request to the built-in provider `resolution.providerId` names, which writes the
+   * request as that provider does: the passthrough parameters (`customModelParams`) without the keys it strips (OpenAI
+   * drops Gemini's `generationConfig`; Gemini and Anthropic drop `response_format`), written over its own fields where
+   * it does so, and an assistant message's tool calls without Gemini's `thoughtSignature` where it leaves that out. The
+   * gateway of `createCompletionGateway` answers true. A caller that sizes a request for the model's context (the GMI)
+   * leaves out what that provider strips only where this is true. A gateway without the method, or one that answers
+   * false, may write the request its own way (the passthrough parameters at the root of an OpenAI-compatible body,
+   * whatever provider its hop names), so the passthrough parameters are counted whole, beside the tools and the
+   * response format they could replace, and the tool calls with everything they carry.
+   */
+  requestWrittenByProvider?(resolution: CompletionResolution): boolean;
 }
 
 /** The tool format a provider expects; the same mapping as GMI.determineToolFormat. */
@@ -1104,5 +1116,10 @@ export function createCompletionGateway(defaults: Partial<CompletionRoute> = {})
     return true;
   }
 
-  return { resolve, stream, schemaInstruction, schemaPayload, toolsSentWithSchema, responseFormatReplacedWithSchema };
+  /** `stream()` calls the hop's provider from the resolution's provider manager, which writes the request itself. */
+  function requestWrittenByProvider(): boolean {
+    return true;
+  }
+
+  return { resolve, stream, schemaInstruction, schemaPayload, toolsSentWithSchema, responseFormatReplacedWithSchema, requestWrittenByProvider };
 }

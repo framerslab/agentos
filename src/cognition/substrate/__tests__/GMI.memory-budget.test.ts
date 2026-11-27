@@ -464,7 +464,8 @@ describe('GMI memory block beside the response format and passthrough parameters
 /**
  * A completion gateway with one hop on `providerId`'s model `modelId`, whose schema answers are the default gateway's
  * (`createCompletionGateway`): it lowers a turn's response schema for that hop, and sends a response-schema request
- * the lowered payload and no tools, as the default gateway's `stream()` does. It answers every request with `answer`
+ * the lowered payload and no tools, as the default gateway's `stream()` does, to the hop's own provider, which writes
+ * the request (`requestWrittenByProvider`). It answers every request with `answer`
  * and records the messages and the options of each request as the hop's provider is given them.
  */
 function servingGateway(providerId: string, modelId: string, window: number, answer: string) {
@@ -489,6 +490,7 @@ function servingGateway(providerId: string, modelId: string, window: number, ans
     schemaInstruction: real.schemaInstruction,
     schemaPayload: real.schemaPayload,
     toolsSentWithSchema: real.toolsSentWithSchema,
+    requestWrittenByProvider: real.requestWrittenByProvider,
   } as unknown as CompletionGateway;
   return { gateway, sent, resolution, real };
 }

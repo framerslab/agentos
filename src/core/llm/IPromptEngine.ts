@@ -217,6 +217,14 @@ export interface ModelTargetInfo {
   modelId: string;
   /** Identifier of the provider hosting the model (e.g., "openai", "ollama"). */
   providerId: string;
+  /**
+   * True when the request is written by the built-in provider `providerId` names, so what that provider leaves out of
+   * its request is not counted: the provider is called directly (a GMI without a completion gateway), or through a
+   * gateway that says so (`CompletionGateway.requestWrittenByProvider`, which the gateway of `createCompletionGateway`
+   * answers true). Absent or false, the engine counts what the request may carry: an assistant message's tool calls
+   * whole, Gemini's `thoughtSignature` included, on every provider.
+   */
+  requestWrittenByProvider?: boolean;
   /** Maximum context length in tokens supported by the model. */
   maxContextTokens: number;
   /**
