@@ -26,7 +26,6 @@ import type {
 } from './core/types.js';
 import { DEFAULT_TRUST_POLICY_BY_SOURCE } from './core/types.js';
 import type { CognitiveMemoryConfig, ManagerRecallConfig, PADState, HexacoTraits } from './core/config.js';
-import { resolveExtractionPolicy } from './extraction/policy.js';
 import type {
   ExtractionCallOptions,
   ExtractionObservationOptions,
@@ -500,8 +499,6 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
 
   private async initializeResources(config: CognitiveMemoryConfig): Promise<void> {
     this.config = config;
-    const extraction = resolveExtractionPolicy(config);
-    const legacyExtraction = extraction.path === 'legacy';
 
     // Cognitive Mechanisms (optional — dynamic import to avoid loading when unused)
     if (config.cognitiveMechanisms) {
@@ -565,12 +562,12 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
     }
 
     // --- Batch 2: Observer ---
-    if (legacyExtraction && config.observer?.llmInvoker) {
+    if (config.observer?.llmInvoker) {
       this.observer = new MemoryObserver(config.traits, config.observer);
     }
 
     // --- Batch 2: Reflector ---
-    if (legacyExtraction && config.reflector?.llmInvoker) {
+    if (config.reflector?.llmInvoker) {
       this.reflector = new MemoryReflector(config.traits, config.reflector);
     }
 
@@ -670,29 +667,32 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
     }
 
     // --- Stage E: Hindsight 4-network typed observer (optional) ---
-    // Legacy callers need an invoker for the manual accessor. The explicit
-    // conversational policy can be resolved without a model callback.
-    if (legacyExtraction && config.typedNetwork && !config.typedNetwork.observerLLM) {
-      throw new Error(
-        'CognitiveMemoryManager: config.typedNetwork is present but ' +
-        'config.typedNetwork.observerLLM is missing. The Stage E ' +
-        'typed-network observer requires an LLM invoker. Either supply ' +
-        'observerLLM or omit config.typedNetwork to disable the feature.',
-      );
-    }
-    const typedNetwork = legacyExtraction ? config.typedNetwork : extraction.typedNetwork;
-    if (typedNetwork && typedNetwork.observerLLM) {
-      this.typedNetworkVariant = typedNetwork.variant;
-      this.typedNetworkExtractAtEncode = legacyExtraction && (typedNetwork.extractAtEncode ?? false);
+    // The observer needs an LLM invoker to do extraction; if config
+    // declares typedNetwork without observerLLM, fail fast with a
+    // descriptive error rather than constructing TypedNetworkObserver
+    // with an undefined LLM (which would throw deep inside extraction
+    // at first encode() call). Mirrors the `config.observer?.llmInvoker`
+    // gating used by the legacy observer above.
+    if (config.typedNetwork) {
+      if (!config.typedNetwork.observerLLM) {
+        throw new Error(
+          'CognitiveMemoryManager: config.typedNetwork is present but ' +
+          'config.typedNetwork.observerLLM is missing. The Stage E ' +
+          'typed-network observer requires an LLM invoker. Either supply ' +
+          'observerLLM or omit config.typedNetwork to disable the feature.',
+        );
+      }
+      this.typedNetworkVariant = config.typedNetwork.variant;
+      this.typedNetworkExtractAtEncode = config.typedNetwork.extractAtEncode ?? false;
       this.typedNetworkStore = new TypedNetworkStore();
       this.typedNetworkObserver = new TypedNetworkObserver({
-        llm: typedNetwork.observerLLM,
+        llm: config.typedNetwork.observerLLM,
       });
       // Spreading activation only for the 'full' variant. 'minimal' performs
       // bank routing at encode but skips graph traversal at retrieve.
-      if (typedNetwork.variant === 'full') {
+      if (config.typedNetwork.variant === 'full') {
         this.typedSpreadingActivation = new TypedSpreadingActivation({
-          decay: typedNetwork.decay ?? 0.5,
+          decay: config.typedNetwork.decay ?? 0.5,
         });
         // Single retriever instance owned by the manager. Used by retrieve()
         // for both seed-finding and spreading activation. The retriever's
@@ -702,7 +702,7 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
         this.typedNetworkRetriever = new TypedNetworkRetriever({
           store: this.typedNetworkStore,
           spreading: this.typedSpreadingActivation,
-          maxDepth: typedNetwork.maxDepth ?? 3,
+          maxDepth: config.typedNetwork.maxDepth ?? 3,
         });
       }
     }

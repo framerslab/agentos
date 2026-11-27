@@ -221,37 +221,4 @@ describe('conversational extraction policy', () => {
       await manager.shutdown();
     }
   });
-
-  it('opens an explicit classical policy without a legacy typed-network invoker', async () => {
-    const manager = new memory.CognitiveMemoryManager();
-    try {
-      await manager.initialize({
-        ...managerConfig,
-        extraction: { mode: 'classical' },
-        typedNetwork: { variant: 'full' },
-      });
-      expect(manager.getTypedNetworkObserver()).toBeNull();
-    } finally {
-      await manager.shutdown();
-    }
-  });
-
-  it('leaves the legacy extraction stages inactive under an enclosing opt-out', async () => {
-    const manager = new memory.CognitiveMemoryManager();
-    try {
-      await manager.initialize({
-        ...managerConfig,
-        extraction: false,
-        observer: { llmInvoker: stageInvoker },
-        reflector: { llmInvoker: stageInvoker },
-        typedNetwork: { variant: 'full', extractAtEncode: true, observerLLM: invoker },
-      });
-      expect(manager.getTypedNetworkObserver()).toBeNull();
-      expect(manager.getTypedNetworkStore()).toBeNull();
-      await expect(manager.observe('user', 'I prefer matte paper.')).resolves.toBeNull();
-      expect(stageInvoker).not.toHaveBeenCalled();
-    } finally {
-      await manager.shutdown();
-    }
-  });
 });
