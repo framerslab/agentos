@@ -1143,8 +1143,9 @@ export class PromptEngine implements IPromptEngine {
      *  - system: 20%, user: 15%, history: 35%, rag: 20%, tools: 10%
      * Summarization: Uses UtilityAI if available & trigger ratio exceeded; else truncation fallback.
      * Memory: `memoryContextText` counts toward the prompt and the rag share and is never reduced; the rag share's
-     *  reduction falls on `retrievedContext` alone, to the smaller of what the share leaves beside the memory block
-     *  and what it holds less the prompt's overrun, and a target of 0 removes it.
+     *  reduction falls on `retrievedContext` alone, to what the share leaves beside the memory block less the prompt's
+     *  overrun, or, where the prompt fits without it, to the smaller of what the share leaves beside the block and what
+     *  it holds less the overrun; a target of 0 removes it.
      * Host note: `applicationNote` counts toward the prompt with the user's message, outside the rag share, and is never
      *  reduced; a prompt over the budget after the reductions goes out with it whole, with the
      *  `TOKEN_BUDGET_EXCEEDED_POST_OPT` warning.
@@ -1265,10 +1266,18 @@ export class PromptEngine implements IPromptEngine {
       let ragTokens = await this.estimateTokenCount(contextStr, modelInfo.modelId);
       otherBefore = ragTokens;
       if (ragTokens + memoryTokens > budgets.rag || currentTokens > promptBudget) {
-        // What the other context may keep: the share less the memory block, and, when the prompt is over its budget,
-        // no more than the context holds less the overrun, so that context under its share still gives the overrun up.
+        // What the other context may keep: the share less the memory block, less the overrun when the prompt is over
+        // its budget. Where the prompt fits its budget without the other context, the context keeps no more than it
+        // holds less the overrun, so that context under its share still gives the overrun up and the prompt fits.
+        // Without the other context, a prompt with no memory block and no host note opens no note, so that budget
+        // takes no frame line off. Where the prompt is over without the other context too, giving it up does not make
+        // the prompt fit, and the share less the overrun alone applies.
         const overrun = Math.max(0, currentTokens - promptBudget);
-        const target = Math.max(0, Math.floor(Math.min(budgets.rag - memoryTokens, ragTokens - overrun)));
+        const fitsWithout =
+          overrun > 0 && currentTokens - ragTokens <= (await this.promptBudgetOf({ ...optimized, retrievedContext: undefined }, modelInfo));
+        const target = Math.max(0, Math.floor(
+          fitsWithout ? Math.min(budgets.rag - memoryTokens, ragTokens - overrun) : budgets.rag - memoryTokens - overrun,
+        ));
         // A target the other context already fits leaves it as it is: nothing is cut, summarised or reported cut.
         if (target < ragTokens) {
           const retrievedBefore = optimized.retrievedContext;
