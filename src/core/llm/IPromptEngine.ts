@@ -617,9 +617,11 @@ export interface IPromptEngine {
    * current turn's messages, the tools and the application note beside a memory block; the memory block, the other
    * retrieved context and the history before the turn are left out.
    *
-   * The GMI holds a turn's memory block to what this figure and the tool schemas it sends leave of the model's
-   * context, since the block is never reduced either. An engine without the method gets no such bound: its block is
-   * sized by the model's retrieved-context share alone.
+   * The GMI holds a turn's memory block to what this figure, the tool schemas it sends and a response schema's
+   * instruction it writes into the prompt leave of the model's context, since the block is never reduced either. It
+   * reads the engine's count of a block's token through `estimateTokenCount`, so the block fits there by this
+   * engine's count. An engine without the method gets no such bound: its block is sized by the model's
+   * retrieved-context share alone.
    *
    * @async
    * @param {Readonly<PromptComponents>} components - The prompt's components, as `constructPrompt` takes them.

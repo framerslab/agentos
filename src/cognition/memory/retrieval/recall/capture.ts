@@ -129,6 +129,13 @@ export interface MemoryRecallCapture {
      * engine that counts them). The block's budget is never above the model's context less this.
      */
     fixedPromptTokens?: number;
+    /**
+     * How many tokens the prompt engine counts for one of the block's own (the assembler's) on the serving model,
+     * when that is more than 1: 1.053 on a model id PromptEngine counts at 3.8 characters a token. What the fixed
+     * parts leave of the context is divided by it, so the block fits there by the engine's count too (a GMI turn's
+     * record).
+     */
+    blockTokenRate?: number;
     /** The model hop the record is for, 0 for the route's primary (a GMI turn's record). */
     hop?: number;
     /** True when the block was rendered again at `effective` from the turn's recall, with no second retrieval. */

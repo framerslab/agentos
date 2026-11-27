@@ -183,7 +183,9 @@ describe('the recall capture on the runtime stream', () => {
     expect(streamed.delivery).toBeUndefined();
     expect(final.memoryRecall).toEqual({
       ...streamed,
-      budget: { requested: 1600, effective: 1600, promptShareTokens: expect.any(Number), otherContextTokens: 0, fixedPromptTokens: expect.any(Number), hop: 0 },
+      // The persona's model id is one PromptEngine counts at 3.8 characters a token, so the record carries the rate
+      // the fixed parts' bound was divided by.
+      budget: { requested: 1600, effective: 1600, promptShareTokens: expect.any(Number), otherContextTokens: 0, fixedPromptTokens: expect.any(Number), blockTokenRate: 1.053, hop: 0 },
       delivery: { memoryBlockTokens: expect.any(Number) },
     });
     expect((final.memoryRecall as { delivery: { memoryBlockTokens: number } }).delivery.memoryBlockTokens).toBeGreaterThan(0);

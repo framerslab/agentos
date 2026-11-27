@@ -126,6 +126,7 @@ export function captureForHop(capture: MemoryRecallCapture, budget: EffectiveRec
       ...(budget.clampReason ? { clampReason: budget.clampReason } : {}),
       ...(budget.promptShareTokens !== undefined ? { promptShareTokens: budget.promptShareTokens, otherContextTokens: budget.otherContextTokens } : {}),
       ...(budget.fixedPromptTokens !== undefined ? { fixedPromptTokens: budget.fixedPromptTokens } : {}),
+      ...(budget.blockTokenRate !== undefined ? { blockTokenRate: budget.blockTokenRate } : {}),
       hop,
       ...(reassembled ? { reassembled: true } : {}),
     },

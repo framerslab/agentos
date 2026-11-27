@@ -539,6 +539,8 @@ describe("agent({ runtime: 'gmi' }) memory budget beside a response schema the p
       expect(budget).toMatchObject({ requested: DEFAULT_RECALL_BUDGET_TOKENS, clampReason: 'fixed_prompt', promptShareTokens: 1600, otherContextTokens: 0, hop: 0, reassembled: true });
       expect(budget.fixedPromptTokens).toBeGreaterThanOrEqual(engineTokensOf(systemTextOf(request.messages)) + engineTokensOf(question));
       expect(budget.effective).toBe(WINDOW - budget.fixedPromptTokens!);
+      // PromptEngine counts a Claude model id's tokens longer than the assembler's, so the bound is not divided.
+      expect(budget.blockTokenRate).toBeUndefined();
       expect(budget.effective).toBeGreaterThan(300);
       expect(tokensOf(block)).toBeLessThanOrEqual(budget.effective);
       expect(events('memory.recall.budget_clamped')).toEqual([expect.objectContaining({ requested: DEFAULT_RECALL_BUDGET_TOKENS, hop: 0, reason: 'fixed_prompt' })]);

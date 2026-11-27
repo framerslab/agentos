@@ -99,6 +99,19 @@ describe('effectiveRecallBudget', () => {
     [{ totalTokens: 6400, contextTokens: 32_000, otherContextTokens: 0, fixedPromptTokens: 40_000 }, { requested: 6400, effective: 0, clampReason: 'zero_remaining', promptShareTokens: 6400, otherContextTokens: 0, fixedPromptTokens: 40_000 }],
   ])("the prompt's fixed parts bound the budget too: %j", (input, expected) => expect(effectiveRecallBudget(input)).toEqual(expected));
 
+  it.each([
+    // 1,000 tokens are left, and the prompt engine counts 1.053 tokens for one of the block's: 949 of the block's fit.
+    [{ totalTokens: 6400, contextTokens: 32_000, otherContextTokens: 0, fixedPromptTokens: 31_000, blockTokenRate: 1.053 }, { requested: 6400, effective: 949, clampReason: 'fixed_prompt', promptShareTokens: 6400, otherContextTokens: 0, fixedPromptTokens: 31_000, blockTokenRate: 1.053 }],
+    // The rate is recorded wherever it is above 1, also when the fixed parts leave the whole budget.
+    [{ totalTokens: 6400, contextTokens: 32_000, otherContextTokens: 0, fixedPromptTokens: 2_000, blockTokenRate: 1.053 }, { requested: 6400, effective: 6400, promptShareTokens: 6400, otherContextTokens: 0, fixedPromptTokens: 2_000, blockTokenRate: 1.053 }],
+    // The share is not divided by it.
+    [{ totalTokens: 6400, contextTokens: 16_000, otherContextTokens: 0, fixedPromptTokens: 2_000, blockTokenRate: 1.053 }, { requested: 6400, effective: 3200, clampReason: 'prompt_share', promptShareTokens: 3200, otherContextTokens: 0, fixedPromptTokens: 2_000, blockTokenRate: 1.053 }],
+    // A rate of 1 or less, or one that is not a finite number, changes nothing and is not recorded: the block is never given more than what is left.
+    [{ totalTokens: 6400, contextTokens: 32_000, otherContextTokens: 0, fixedPromptTokens: 31_000, blockTokenRate: 0.953 }, { requested: 6400, effective: 1000, clampReason: 'fixed_prompt', promptShareTokens: 6400, otherContextTokens: 0, fixedPromptTokens: 31_000 }],
+    [{ totalTokens: 6400, contextTokens: 32_000, otherContextTokens: 0, fixedPromptTokens: 31_000, blockTokenRate: 1 }, { requested: 6400, effective: 1000, clampReason: 'fixed_prompt', promptShareTokens: 6400, otherContextTokens: 0, fixedPromptTokens: 31_000 }],
+    [{ totalTokens: 6400, contextTokens: 32_000, otherContextTokens: 0, fixedPromptTokens: 31_000, blockTokenRate: Number.NaN }, { requested: 6400, effective: 1000, clampReason: 'fixed_prompt', promptShareTokens: 6400, otherContextTokens: 0, fixedPromptTokens: 31_000 }],
+  ])("what the fixed parts leave is counted as the prompt engine counts the block: %j", (input, expected) => expect(effectiveRecallBudget(input)).toEqual(expected));
+
   it("a count of the prompt's fixed parts that is not a finite number of at least 0 skips the clamp", () => {
     for (const fixedPromptTokens of [Number.NaN, Number.POSITIVE_INFINITY, -1]) {
       expect(effectiveRecallBudget({ totalTokens: 1600, contextTokens: 8_000, otherContextTokens: 0, fixedPromptTokens })).toEqual({ requested: 1600, effective: 1600, invalid: true });

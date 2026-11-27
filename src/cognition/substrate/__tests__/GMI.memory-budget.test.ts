@@ -199,6 +199,7 @@ describe('GMI memory block on a small model', () => {
     const left = 8_000 - capture.budget.fixedPromptTokens!;
     expect(left).toBeGreaterThan(300);
     expect(left).toBeLessThan(700);
+    expect(capture.budget.blockTokenRate).toBe(1.053);
     expect(capture.budget.effective).toBe(Math.floor(left / 1.053));
     expect(capture.tokensUsed).toBeLessThanOrEqual(capture.budget.effective);
     // PromptEngine's own count of the block is within what the fixed parts left, and of the prompt within its budget.
@@ -279,6 +280,7 @@ describe('GMI memory block on a small model', () => {
     expect(reassemble).not.toHaveBeenCalled();
     // The record carries the count of the prompt's fixed parts: the system prompt, the question, the note's frame line
     // and the tool schema, a few dozen tokens here.
+    // No rate: PromptEngine counts this model id's tokens as the assembler does.
     expect(capture.budget).toEqual({ requested: 1600, effective: 1600, promptShareTokens: 25_600, otherContextTokens: 0, fixedPromptTokens: expect.any(Number), hop: 0 });
     expect(capture.budget.fixedPromptTokens).toBeGreaterThan(0);
     expect(capture.budget.fixedPromptTokens).toBeLessThan(200);
