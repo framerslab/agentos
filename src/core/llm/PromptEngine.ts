@@ -159,6 +159,22 @@ export const APPLICATION_NOTE_FRAME =
 const USER_TEXT_PART_PROVIDERS: ReadonlySet<string> = new Set(['anthropic', 'gemini', 'openai', 'openrouter']);
 
 /**
+ * The providers whose request sends an assistant message's tool calls as each call's id, type and function alone:
+ * OpenAI and the providers that send through its request builder (MiniMax, Groq, Mistral, Together, xAI, LiteLLM),
+ * OpenRouter, and Ollama, which writes the id, type and function of each. They leave out what else a call carries,
+ * Gemini's `thoughtSignature` among it. Gemini sends the signature back; Requesty sends the calls as given.
+ */
+const STANDARD_TOOL_CALL_FIELDS_PROVIDERS: ReadonlySet<string> = new Set([
+  'openai', 'minimax', 'groq', 'mistral', 'together', 'xai', 'litellm', 'openrouter', 'ollama',
+]);
+
+/**
+ * How a prompt's assistant messages send their tool calls, for the history's count: `none` where the template sends
+ * none, `standard_fields` as each call's id, type and function alone, `whole` with everything a call carries.
+ */
+type ToolCallsAsSent = 'none' | 'standard_fields' | 'whole';
+
+/**
  * The note's text as the model receives it: the frame line, then the text whole.
  *
  * @param text - What the note carries ({@link noteTextOf}). Not empty.
@@ -684,7 +700,7 @@ export class PromptEngine implements IPromptEngine {
       fixed,
       modelTargetInfo.modelId,
       this.thinkingSentFor(history, modelTargetInfo),
-      this.toolCallsSentBy(modelTargetInfo.promptFormatType || this.config.defaultTemplateName),
+      this.toolCallsAsSent(modelTargetInfo.promptFormatType || this.config.defaultTemplateName, modelTargetInfo),
     );
     const hostNote = hostNoteOf(components);
     const noteBesideBlock = hostNote
@@ -760,7 +776,7 @@ export class PromptEngine implements IPromptEngine {
     let estimatedTokens = 0;
     if (components.systemPrompts) estimatedTokens += (await Promise.all(components.systemPrompts.map(sp => this.estimateTokenCount(sp.content, modelTargetInfo.modelId)))).reduce((a,b) => a+b, 0);
     if (components.userInput) estimatedTokens += await this.estimateTokenCount(components.userInput, modelTargetInfo.modelId);
-    if (components.conversationHistory) estimatedTokens += await this.calculateTokensForMessages(components.conversationHistory, modelTargetInfo.modelId, this.thinkingSentFor(components.conversationHistory, modelTargetInfo), this.toolCallsSentBy(modelTargetInfo.promptFormatType || this.config.defaultTemplateName));
+    if (components.conversationHistory) estimatedTokens += await this.calculateTokensForMessages(components.conversationHistory, modelTargetInfo.modelId, this.thinkingSentFor(components.conversationHistory, modelTargetInfo), this.toolCallsAsSent(modelTargetInfo.promptFormatType || this.config.defaultTemplateName, modelTargetInfo));
     // The host's note counts as it is sent, as the budget step counts it.
     const hostNote = hostNoteOf(components);
     if (hostNote) estimatedTokens += await this.estimateTokenCount(hostNoteAsSent(hostNote, components), modelTargetInfo.modelId);
@@ -1177,7 +1193,7 @@ export class PromptEngine implements IPromptEngine {
     const reservedTokens = reservedTokensOf(optimized);
     const promptBudget = await this.promptBudgetOf(optimized, modelInfo);
     const sendsThinking = this.thinkingSentFor(optimized.conversationHistory, modelInfo);
-    const sendsToolCalls = this.toolCallsSentBy(templateName ?? modelInfo.promptFormatType ?? this.config.defaultTemplateName);
+    const sendsToolCalls = this.toolCallsAsSent(templateName ?? modelInfo.promptFormatType ?? this.config.defaultTemplateName, modelInfo);
     let currentTokens = await this.calculateTotalTokens(optimized, modelInfo.modelId, sendsThinking, sendsToolCalls);
     modifications.details!.originalEstimatedTokenCount = currentTokens;
 
@@ -1362,11 +1378,29 @@ export class PromptEngine implements IPromptEngine {
     return !template || (template !== this.defaultTemplates.anthropic_messages && template !== this.defaultTemplates.generic_completion);
   }
 
+  /**
+   * How a prompt's assistant messages send their tool calls, for the history's count: not at all where the template
+   * sends none ({@link toolCallsSentBy}); as each call's id, type and function alone where the hop's request is written
+   * by a built-in provider that sends those fields only (`ModelTargetInfo.requestWrittenByProvider`, and a provider in
+   * {@link STANDARD_TOOL_CALL_FIELDS_PROVIDERS}: OpenAI and the providers that send through its request builder,
+   * OpenRouter and Ollama leave Gemini's `thoughtSignature` out); and whole, the signature included, everywhere else:
+   * Gemini sends it back, and a request whose writer is not known may.
+   *
+   * @param templateName - The template the prompt is built with.
+   * @param modelInfo - The hop's model and provider.
+   */
+  private toolCallsAsSent(templateName: string | undefined, modelInfo: Readonly<ModelTargetInfo>): ToolCallsAsSent {
+    if (!this.toolCallsSentBy(templateName)) return 'none';
+    return modelInfo.requestWrittenByProvider === true && STANDARD_TOOL_CALL_FIELDS_PROVIDERS.has(modelInfo.providerId)
+      ? 'standard_fields'
+      : 'whole';
+  }
+
   private async calculateTotalTokens(
     components: PromptComponents,
     modelId: string,
     sendsThinking: (msg: Message) => boolean = () => false,
-    sendsToolCalls = true,
+    sendsToolCalls: ToolCallsAsSent = 'whole',
   ): Promise<number> {
     let total = 0;
     if(components.systemPrompts) total += (await Promise.all(components.systemPrompts.map(sp => this.estimateTokenCount(sp.content, modelId)))).reduce((a,b) => a+b, 0);
@@ -1421,7 +1455,7 @@ export class PromptEngine implements IPromptEngine {
     messages: Message[],
     modelId: string,
     sendsThinking: (msg: Message) => boolean = () => false,
-    sendsToolCalls = true,
+    sendsToolCalls: ToolCallsAsSent = 'whole',
   ): Promise<number> {
     if (!messages) return 0;
     let sum = 0;
@@ -1445,9 +1479,12 @@ export class PromptEngine implements IPromptEngine {
         sum += await this.estimateTokenCount(JSON.stringify(msg.content), modelId);
       }
       // An assistant message's tool calls are sent with it, their arguments included, in the form the chat template
-      // writes them, where the template sends them (toolCallsSentBy).
-      if (sendsToolCalls && msg.tool_calls && msg.tool_calls.length > 0) {
-        sum += await this.estimateTokenCount(JSON.stringify(this.normalizeToolCalls(msg.tool_calls)), modelId);
+      // writes them, where the template sends them, and without Gemini's thought signature where the hop's provider
+      // leaves it out (toolCallsAsSent).
+      if (sendsToolCalls !== 'none' && msg.tool_calls && msg.tool_calls.length > 0) {
+        const calls = this.normalizeToolCalls(msg.tool_calls) ?? [];
+        const counted = sendsToolCalls === 'standard_fields' ? calls.map(({ id, type, function: fn }) => ({ id, type, function: fn })) : calls;
+        sum += await this.estimateTokenCount(JSON.stringify(counted), modelId);
       }
       // Thinking the target receives with the message is input too.
       if (sendsThinking(msg)) {
@@ -1479,7 +1516,7 @@ export class PromptEngine implements IPromptEngine {
     modelId: string,
     minKept = 1,
     sendsThinking: (msg: Message) => boolean = () => false,
-    sendsToolCalls = true,
+    sendsToolCalls: ToolCallsAsSent = 'whole',
   ): Promise<Message[]> {
     const tokens: number[] = [];
     for (const msg of messages) tokens.push(await this.calculateTokensForMessages([msg], modelId, sendsThinking, sendsToolCalls));

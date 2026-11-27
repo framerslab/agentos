@@ -279,4 +279,34 @@ describe("PromptEngine's history count of tool calls, by what the template sends
     expect(text, 'the oldest round, whose calls this template sends').not.toContain('Crossing 0 is logged.');
     expect(built.modificationDetails?.historyOmitted?.messages).toBeGreaterThan(0);
   });
+
+  /** Two earlier tool rounds whose calls carry Gemini thought signatures of about 1,000 tokens each, small arguments. */
+  const SIGNED = Array.from({ length: 2 }, (_, i) => [
+    { role: 'user', content: `Earlier crossing question ${i}: log the crossing.` },
+    { role: 'assistant', content: null, tool_calls: [{ id: `call-${i}`, name: 'log_crossing', arguments: { crossing: i }, thoughtSignature: `sig-${i}-${'A'.repeat(4_000)}` }] },
+    { role: 'tool', tool_call_id: `call-${i}`, content: `Logged crossing ${i}.` },
+    { role: 'assistant', content: `Crossing ${i} is logged.` },
+  ]).flat();
+
+  it.each([
+    { providerId: 'openai', writtenByProvider: true, signatureCounted: false },
+    { providerId: 'openrouter', writtenByProvider: true, signatureCounted: false },
+    { providerId: 'gemini', writtenByProvider: true, signatureCounted: true },
+    { providerId: 'requesty', writtenByProvider: true, signatureCounted: true },
+    { providerId: 'openai', writtenByProvider: undefined, signatureCounted: true },
+  ])('a thought signature on a $providerId hop (request written by the provider: $writtenByProvider) is counted only where it may be sent', async ({ providerId, writtenByProvider, signatureCounted }) => {
+    const model: ModelTargetInfo = { ...MODEL, providerId, ...(writtenByProvider === undefined ? {} : { requestWrittenByProvider: writtenByProvider }) };
+    const built = await engine.constructPrompt({ ...base, conversationHistory: SIGNED } as never, model, executionContext);
+    const text = JSON.stringify(built.prompt);
+    expect(text).toContain('Crossing 1 is logged.');
+    if (signatureCounted) {
+      // Two signatures are over the history's share: the oldest round is left out.
+      expect(text, 'the oldest round, whose signature the request may carry').not.toContain('Crossing 0 is logged.');
+      expect(built.modificationDetails?.historyOmitted?.messages).toBeGreaterThan(0);
+    } else {
+      // The calls as this provider sends them are a few dozen tokens: the history fits its share whole.
+      expect(text, 'the oldest round, which fits as the provider sends it').toContain('Crossing 0 is logged.');
+      expect(built.modificationDetails?.historyOmitted).toBeUndefined();
+    }
+  });
 });
