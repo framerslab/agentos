@@ -1084,6 +1084,41 @@ export class GMI implements IGMI {
    * Adds an entry to the GMI's reasoning trace.
    * @private
    */
+  /**
+   * The tokens of a hop's request that nothing reduces to fit the model: the prompt's fixed parts as the prompt engine
+   * counts them (`estimateFixedPromptTokens`: the system prompts, the current turn's messages, the host's note) and
+   * the tool schemas the request carries beside the prompt, counted with the engine's estimate of their JSON. The
+   * memory block is held to what these leave of the model's context ({@link effectiveRecallBudget}).
+   *
+   * @param components - The turn's prompt components, without the hop's memory block.
+   * @param modelTargetInfo - The hop's model.
+   * @param executionContext - The turn's prompt execution context.
+   * @param tools - The tool schemas the request carries.
+   * @returns The tokens; undefined when the engine has no `estimateFixedPromptTokens`, or its count failed or was not
+   *   a finite number of at least 0 (one reasoning-trace warning), so the block is sized by the prompt share alone.
+   */
+  private async fixedPromptTokensOf(
+    components: PromptComponents,
+    modelTargetInfo: ModelTargetInfo,
+    executionContext: PromptExecutionContext,
+    tools: ModelCompletionOptions['tools'],
+  ): Promise<number | undefined> {
+    const engine = this.promptEngine;
+    if (typeof engine.estimateFixedPromptTokens !== 'function') return undefined;
+    try {
+      const promptTokens = await engine.estimateFixedPromptTokens(components, modelTargetInfo, executionContext);
+      const toolSchemaTokens = tools && tools.length > 0 ? await engine.estimateTokenCount(JSON.stringify(tools), modelTargetInfo.modelId) : 0;
+      const total = promptTokens + toolSchemaTokens;
+      if (typeof total === 'number' && Number.isFinite(total) && total >= 0) return total;
+      this.addTraceEntry(ReasoningEntryType.WARNING, "The prompt's fixed parts were not counted as a number; the memory block is sized by the prompt share alone.");
+    } catch (error: unknown) {
+      this.addTraceEntry(ReasoningEntryType.WARNING, "Counting the prompt's fixed parts failed; the memory block is sized by the prompt share alone.", {
+        errorName: error instanceof Error ? error.name : typeof error,
+      });
+    }
+    return undefined;
+  }
+
   private addTraceEntry(type: ReasoningEntryType, message: string, details?: Record<string, any>, timestamp?: Date): void {
     while (this.reasoningTrace.entries.length >= this.traceLimits.maxEntries) {
       this.reasoningTrace.entries.shift();
@@ -2361,19 +2396,22 @@ export class GMI implements IGMI {
               }
             : await this.legacyModelTargetInfo(modelIdToUse, providerIdForModel);
 
-          // The memory block for this hop's model: the turn's first rendering where the model's share of the prompt
-          // holds it, else the block rendered again at what the share leaves after the RAG and long-term-memory text
-          // (no second recall). Later calls of the turn (tool continuations) assembled nothing and send no block.
+          // The memory block for this hop's model: the turn's first rendering where the model holds it, else the block
+          // rendered again (no second recall) at the smaller of what the model's share of the prompt leaves after the
+          // RAG and long-term-memory text and what the prompt's fixed parts leave of the model's context. Later calls of
+          // the turn (tool continuations) assembled nothing and send no block.
           let hopMemoryContext: AssembledMemoryContext | null = assembledMemoryContext;
           let hopCapture: MemoryRecallCapture | undefined = assembledMemoryContext?.capture;
           const ragTokens = estimateMemoryTokens(augmentedContextFromRAG);
           const longTermMemoryTokens = estimateMemoryTokens(injectedLongTermMemoryContext);
           if (assembledMemoryContext && this.memoryBridge) {
             const hop = resolution?.hop ?? 0;
+            const fixedPromptTokens = await this.fixedPromptTokensOf(promptComponents, modelTargetInfo, promptExecContext, llmOptions.tools);
             const hopBudget = effectiveRecallBudget({
               totalTokens: this.memoryBridge.budgetTokens(),
               contextTokens: modelTargetInfo.optimalContextTokens || modelTargetInfo.maxContextTokens,
               otherContextTokens: ragTokens + longTermMemoryTokens,
+              ...(fixedPromptTokens !== undefined ? { fixedPromptTokens } : {}),
             });
             hopMemoryContext = await this.memoryBridge.contextForHop(assembledMemoryContext, hopBudget, hop);
             hopCapture = hopMemoryContext

@@ -125,6 +125,7 @@ export function captureForHop(capture: MemoryRecallCapture, budget: EffectiveRec
       effective: budget.effective,
       ...(budget.clampReason ? { clampReason: budget.clampReason } : {}),
       ...(budget.promptShareTokens !== undefined ? { promptShareTokens: budget.promptShareTokens, otherContextTokens: budget.otherContextTokens } : {}),
+      ...(budget.fixedPromptTokens !== undefined ? { fixedPromptTokens: budget.fixedPromptTokens } : {}),
       hop,
       ...(reassembled ? { reassembled: true } : {}),
     },
@@ -583,7 +584,7 @@ export class CognitiveMemoryBridge {
    * smaller gets the block rendered again at `budget.effective`, through the manager's `reassembleForBudget` (no
    * retrieval, no embedding call), else, for a manager without that method, through `assembleForPrompt` again at that
    * budget with the turn's query and scopes. A `reassembleForBudget` that rejects is not followed by a second recall. A budget whose inputs were not valid leaves the block as it is, with one
-   * `memory.recall.budget_clamped` line (`invalid`); a clamp writes one (`prompt_share` or `zero_remaining`), and a
+   * `memory.recall.budget_clamped` line (`invalid`); a clamp writes one (`prompt_share`, `fixed_prompt` or `zero_remaining`), and a
    * budget of 0 also one `memory.recall.allocation_exhausted`.
    *
    * @param context - The turn's first rendering.

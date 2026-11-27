@@ -433,15 +433,7 @@ export class PromptEngine implements IPromptEngine {
       if (executionContext?.activePersona?.contextualPromptElements) {
         const timerId = 'contextualElementSelection';
         this.startPerformanceTimer(timerId);
-        // Corrected: use contextualPromptElements directly
-        for (const element of executionContext.activePersona.contextualPromptElements) {
-          if (element.criteria && await this.evaluateCriteria(element.criteria, executionContext)) {
-            selectedElements.push(element);
-          }
-        }
-        selectedElements.sort((a,b) => (b.priority || 0) - (a.priority || 0));
-        const maxElementsOverall = 10; // Example
-        selectedElements = selectedElements.slice(0, maxElementsOverall);
+        selectedElements = await this.selectContextualElements(executionContext);
 
         result.metadata.selectedContextualElementIds = selectedElements.map(el => el.id || 'unnamed_contextual_element');
         this.recordPerformanceTimer(timerId, Date.now() - constructionStart); // Pass actual duration
@@ -579,6 +571,92 @@ export class PromptEngine implements IPromptEngine {
 
     this.recordPerformanceTimer(timerId, Date.now() - evalStart);
     return overallMatch;
+  }
+
+  /**
+   * The persona's contextual elements whose criteria the execution context meets: the ten of highest priority,
+   * highest first.
+   *
+   * @param executionContext - The turn's execution context.
+   * @returns The selected elements.
+   */
+  private async selectContextualElements(executionContext: Readonly<PromptExecutionContext>): Promise<ContextualPromptElement[]> {
+    const selected: ContextualPromptElement[] = [];
+    for (const element of executionContext.activePersona?.contextualPromptElements ?? []) {
+      if (element.criteria && await this.evaluateCriteria(element.criteria, executionContext)) {
+        selected.push(element);
+      }
+    }
+    selected.sort((a, b) => (b.priority || 0) - (a.priority || 0));
+    const maxElementsOverall = 10; // Example
+    return selected.slice(0, maxElementsOverall);
+  }
+
+  /**
+   * Where the turn being answered starts in `history`: the index of the first of its `currentTurnMessageCount`
+   * messages, moved back to the start of the tool round that message belongs to, so a call before the turn whose
+   * result the turn holds stays with that result. `history.length` when the turn has no message in the history.
+   *
+   * @param history - The conversation history, oldest first.
+   * @param currentTurnMessageCount - How many of its last messages belong to the turn being answered.
+   * @returns The index the turn's messages start at.
+   */
+  private turnStartOf(history: Message[], currentTurnMessageCount: number | undefined): number {
+    const turnCount = Math.min(
+      Math.max(0, Math.floor(currentTurnMessageCount ?? 0)),
+      history.length,
+    );
+    const turnStart = history.length - turnCount;
+    return turnStart < history.length ? toolRoundBounds(history).start[turnStart] : turnStart;
+  }
+
+  /**
+   * The tokens of the parts of a prompt that the budget step never reduces, each counted as that step counts it: the
+   * system prompts (with the entries the execution context adds), `userInput`, the current turn's messages (with the
+   * tool round the turn's first message belongs to), the tools, and the application note as it is sent beside a memory
+   * block: its frame line, the host's note when the turn has one, and the separators after it. With no turn message
+   * and no `userInput`, the newest history message counts, with its tool round, since the budget step keeps it so that
+   * there is a message to send.
+   *
+   * The memory block, the other retrieved context and the history before the turn are not counted: the block is what
+   * the caller sizes with this figure, and the other two are what the budget step reduces. A memory block of at most
+   * the model's context less this figure leaves the prompt within the budget once those two are reduced.
+   *
+   * @param baseComponents - The prompt's components, as `constructPrompt` takes them. Not changed.
+   * @param modelTargetInfo - The model the prompt is built for.
+   * @param executionContext - The turn's execution context, as `constructPrompt` takes it.
+   * @returns The tokens of the fixed parts.
+   */
+  public async estimateFixedPromptTokens(
+    baseComponents: Readonly<PromptComponents>,
+    modelTargetInfo: Readonly<ModelTargetInfo>,
+    executionContext?: Readonly<PromptExecutionContext>,
+  ): Promise<number> {
+    this.ensureInitialized();
+    const components = this.augmentBaseComponents(
+      JSON.parse(JSON.stringify(baseComponents)) as PromptComponents,
+      executionContext ? await this.selectContextualElements(executionContext) : [],
+      executionContext,
+    );
+    const history = components.conversationHistory ?? [];
+    let turnStart = this.turnStartOf(history, components.currentTurnMessageCount);
+    if (turnStart >= history.length && history.length > 0 && !components.userInput) {
+      turnStart = toolRoundBounds(history).start[history.length - 1];
+    }
+    // The note is counted apart, as it is sent beside a block; the block and the other retrieved context not at all.
+    const fixed: PromptComponents = {
+      ...components,
+      conversationHistory: history.slice(turnStart),
+      applicationNote: undefined,
+      memoryContextText: undefined,
+      retrievedContext: undefined,
+    };
+    const partsTokens = await this.calculateTotalTokens(fixed, modelTargetInfo.modelId, this.thinkingSentFor(history, modelTargetInfo));
+    const hostNote = hostNoteOf(components);
+    const noteBesideBlock = hostNote
+      ? hostNoteAsSent(hostNote, { ...components, memoryContextText: components.memoryContextText || ' ' })
+      : applicationNoteOf('');
+    return partsTokens + await this.estimateTokenCount(noteBesideBlock, modelTargetInfo.modelId);
   }
 
   public async estimateTokenCount(content: string, modelId?: string): Promise<number> {
@@ -1052,12 +1130,7 @@ export class PromptEngine implements IPromptEngine {
         // the turn whose result the turn holds is kept with that result. Only
         // the messages before them are reduced, to what the budget leaves them.
         const history = optimized.conversationHistory;
-        const turnCount = Math.min(
-          Math.max(0, Math.floor(optimized.currentTurnMessageCount ?? 0)),
-          history.length,
-        );
-        let turnStart = history.length - turnCount;
-        if (turnStart < history.length) turnStart = toolRoundBounds(history).start[turnStart];
+        const turnStart = this.turnStartOf(history, optimized.currentTurnMessageCount);
         const turnMessages = history.slice(turnStart);
         const earlier = history.slice(0, turnStart);
         const turnTokens = await this.calculateTokensForMessages(turnMessages, modelInfo.modelId, sendsThinking);

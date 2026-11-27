@@ -439,8 +439,8 @@ describe.each(ENGINES)("agent({ runtime: 'gmi' }) memory.recall over a durable s
       // again in it, from the turn's one recall.
       const record = out.memoryRecall!;
       expect(record).toBeDefined();
-      const budget = record.budget as MemoryRecallCapture['budget'] & { fixedPromptTokens?: number };
-      expect(budget as Record<string, unknown>).toMatchObject({ requested: 6400, clampReason: 'fixed_prompt', promptShareTokens: 6400, otherContextTokens: 0, hop: 0, reassembled: true });
+      const budget = record.budget;
+      expect(budget).toMatchObject({ requested: 6400, clampReason: 'fixed_prompt', promptShareTokens: 6400, otherContextTokens: 0, hop: 0, reassembled: true });
       expect(budget.fixedPromptTokens).toBeGreaterThan(25_600);
       expect(budget.effective).toBe(WINDOW - budget.fixedPromptTokens!);
       expect(budget.effective).toBeGreaterThan(1600);

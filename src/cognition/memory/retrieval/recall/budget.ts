@@ -10,7 +10,8 @@ import { recallLog } from './log.js';
 /**
  * The memory block's budget, in tokens, when no `recall.budget.totalTokens` is set. A model whose retrieved-context
  * share ({@link PROMPT_CONTEXT_SHARE} of its context) holds less is sent a smaller block ({@link effectiveRecallBudget}):
- * the whole 6,400 reaches a model of 32,000 tokens of context or more, on a turn with no other retrieved context.
+ * the whole 6,400 reaches a model of 32,000 tokens of context or more, on a turn with no other retrieved context whose
+ * system prompt, current turn and tool schemas leave 6,400 tokens of that context.
  */
 export const DEFAULT_RECALL_BUDGET_TOKENS = 6400;
 
@@ -208,18 +209,27 @@ export function recallBudgetTokens(recall: ManagerRecallConfig | null | undefine
  */
 export const PROMPT_CONTEXT_SHARE = 0.2;
 
-/** The memory block's budget on one model: what was asked for, what the model's share leaves, and why they differ. */
+/**
+ * The memory block's budget on one model: what was asked for, what the model's share and the prompt's fixed parts
+ * leave, and why they differ.
+ */
 export interface EffectiveRecallBudget {
   /** The configured budget (`recall.budget.totalTokens`). */
   requested: number;
   /** The budget the block is rendered in on this model: never above `requested`, never below 0. */
   effective: number;
-  /** Set when `effective` is below `requested`: `zero_remaining` when nothing is left, `prompt_share` otherwise. */
-  clampReason?: 'prompt_share' | 'zero_remaining';
+  /**
+   * Set when `effective` is below `requested`: `zero_remaining` when nothing is left; otherwise `fixed_prompt` when
+   * what the prompt's fixed parts leave of the model's context is the smaller bound, and `prompt_share` when what is
+   * left of the share is.
+   */
+  clampReason?: 'prompt_share' | 'fixed_prompt' | 'zero_remaining';
   /** The model's retrieved-context share, in tokens. */
   promptShareTokens?: number;
   /** The turn's other retrieved context, in tokens, which the share holds first. */
   otherContextTokens?: number;
+  /** The parts of the prompt that are never reduced, in tokens, when the caller counted them. */
+  fixedPromptTokens?: number;
   /**
    * An input was not a finite number of at least 0 (the context size: above 0), so the clamp was skipped and
    * `effective` is `requested`.
@@ -228,24 +238,53 @@ export interface EffectiveRecallBudget {
 }
 
 /**
- * The memory block's budget on one model: the smaller of the configured budget and what is left of the model's
+ * The memory block's budget on one model: the smallest of the configured budget, what is left of the model's
  * retrieved-context share ({@link PROMPT_CONTEXT_SHARE} of `contextTokens`, floored) after the turn's RAG and
- * long-term-memory text. Never below 0.
+ * long-term-memory text, and, when `fixedPromptTokens` is given, what the prompt's fixed parts leave of the model's
+ * context (`contextTokens - fixedPromptTokens`). Never below 0.
+ *
+ * The fixed parts are the ones no step of the prompt's budget reduces: the system prompt, the current turn's messages,
+ * the host's note and the tool schemas. The memory block is never reduced either, so without this bound a block that
+ * fits the share can still take the request past the model's context.
  *
  * @param i.totalTokens - The configured budget.
  * @param i.contextTokens - The model's context size as PromptEngine budgets it (`optimalContextTokens`, else `maxContextTokens`).
  * @param i.otherContextTokens - The tokens of the turn's other retrieved context.
+ * @param i.fixedPromptTokens - The tokens of the prompt's fixed parts, as the prompt engine counts them. Unset, the
+ *   context bound is not applied.
  * @returns The budget, with `invalid` set when an input was not a finite number in range.
  */
-export function effectiveRecallBudget(i: { totalTokens: number; contextTokens: number; otherContextTokens: number }): EffectiveRecallBudget {
+export function effectiveRecallBudget(i: {
+  totalTokens: number;
+  contextTokens: number;
+  otherContextTokens: number;
+  fixedPromptTokens?: number;
+}): EffectiveRecallBudget {
   const inRange = (n: number): boolean => typeof n === 'number' && Number.isFinite(n) && n >= 0;
-  if (!inRange(i.totalTokens) || !inRange(i.otherContextTokens) || !inRange(i.contextTokens) || i.contextTokens === 0) {
+  const fixedPromptTokens = i.fixedPromptTokens ?? undefined;
+  if (
+    !inRange(i.totalTokens) ||
+    !inRange(i.otherContextTokens) ||
+    !inRange(i.contextTokens) ||
+    i.contextTokens === 0 ||
+    (fixedPromptTokens !== undefined && !inRange(fixedPromptTokens))
+  ) {
     return { requested: i.totalTokens, effective: i.totalTokens, invalid: true };
   }
   const promptShareTokens = Math.floor(PROMPT_CONTEXT_SHARE * i.contextTokens);
-  const effective = Math.max(0, Math.min(i.totalTokens, promptShareTokens - i.otherContextTokens));
-  const budget: EffectiveRecallBudget = { requested: i.totalTokens, effective, promptShareTokens, otherContextTokens: i.otherContextTokens };
-  if (effective < i.totalTokens) budget.clampReason = effective === 0 ? 'zero_remaining' : 'prompt_share';
+  const shareLeft = promptShareTokens - i.otherContextTokens;
+  const contextLeft = fixedPromptTokens === undefined ? Number.POSITIVE_INFINITY : Math.floor(i.contextTokens - fixedPromptTokens);
+  const effective = Math.max(0, Math.min(i.totalTokens, shareLeft, contextLeft));
+  const budget: EffectiveRecallBudget = {
+    requested: i.totalTokens,
+    effective,
+    promptShareTokens,
+    otherContextTokens: i.otherContextTokens,
+    ...(fixedPromptTokens !== undefined ? { fixedPromptTokens } : {}),
+  };
+  if (effective < i.totalTokens) {
+    budget.clampReason = effective === 0 ? 'zero_remaining' : contextLeft < shareLeft ? 'fixed_prompt' : 'prompt_share';
+  }
   return budget;
 }
 
