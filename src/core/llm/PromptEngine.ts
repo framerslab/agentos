@@ -1420,6 +1420,10 @@ export class PromptEngine implements IPromptEngine {
         // This case should not be common if msg.content is Array for multi-part, but as a fallback:
         sum += await this.estimateTokenCount(JSON.stringify(msg.content), modelId);
       }
+      // An assistant message's tool calls are sent with it, their arguments included, in the form the templates write.
+      if (msg.tool_calls && msg.tool_calls.length > 0) {
+        sum += await this.estimateTokenCount(JSON.stringify(this.normalizeToolCalls(msg.tool_calls)), modelId);
+      }
       // Thinking the target receives with the message is input too.
       if (sendsThinking(msg)) {
         for (const block of msg.thinkingBlocks ?? []) {
@@ -1434,8 +1438,9 @@ export class PromptEngine implements IPromptEngine {
   /**
    * Drops the oldest messages until the rest fit `targetTokenCount`, keeping
    * at least `minKept`. Each message is counted as the budget step counts it
-   * (`calculateTokensForMessages`: the model's rate, the thinking the target
-   * receives with it and the per-message overhead), so what is kept measures
+   * (`calculateTokensForMessages`: the model's rate, an assistant message's
+   * tool calls with their arguments, the thinking the target receives with it
+   * and the per-message overhead), so what is kept measures
    * within the target. Chat APIs reject a tool call without its result and a
    * tool result without its call, so a tool round (an assistant message that
    * names tool calls, the tool messages that answer them and anything between)
