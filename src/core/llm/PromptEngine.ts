@@ -235,18 +235,6 @@ function reservedTokensOf(components: Readonly<PromptComponents>): number {
 }
 
 /**
- * Whether the template a prompt is built with sends an assistant message's tool calls. The Anthropic template sends
- * an assistant message's content alone, and the generic template writes each message as its role and content, so
- * neither sends the calls, and the history's count leaves their arguments out there. Every other template (the
- * OpenAI chat template, and a host's own) is taken to send them.
- *
- * @param templateName - The template the prompt is built with.
- */
-function toolCallsSentBy(templateName: string | undefined): boolean {
-  return templateName !== 'anthropic_messages' && templateName !== 'generic_completion';
-}
-
-/**
  * The newest user message's content with the note in front of it. The person's words are never changed: no label
  * goes in front of them and nothing is trimmed.
  *
@@ -696,7 +684,7 @@ export class PromptEngine implements IPromptEngine {
       fixed,
       modelTargetInfo.modelId,
       this.thinkingSentFor(history, modelTargetInfo),
-      toolCallsSentBy(modelTargetInfo.promptFormatType || this.config.defaultTemplateName),
+      this.toolCallsSentBy(modelTargetInfo.promptFormatType || this.config.defaultTemplateName),
     );
     const hostNote = hostNoteOf(components);
     const noteBesideBlock = hostNote
@@ -772,7 +760,7 @@ export class PromptEngine implements IPromptEngine {
     let estimatedTokens = 0;
     if (components.systemPrompts) estimatedTokens += (await Promise.all(components.systemPrompts.map(sp => this.estimateTokenCount(sp.content, modelTargetInfo.modelId)))).reduce((a,b) => a+b, 0);
     if (components.userInput) estimatedTokens += await this.estimateTokenCount(components.userInput, modelTargetInfo.modelId);
-    if (components.conversationHistory) estimatedTokens += await this.calculateTokensForMessages(components.conversationHistory, modelTargetInfo.modelId, this.thinkingSentFor(components.conversationHistory, modelTargetInfo), toolCallsSentBy(modelTargetInfo.promptFormatType || this.config.defaultTemplateName));
+    if (components.conversationHistory) estimatedTokens += await this.calculateTokensForMessages(components.conversationHistory, modelTargetInfo.modelId, this.thinkingSentFor(components.conversationHistory, modelTargetInfo), this.toolCallsSentBy(modelTargetInfo.promptFormatType || this.config.defaultTemplateName));
     // The host's note counts as it is sent, as the budget step counts it.
     const hostNote = hostNoteOf(components);
     if (hostNote) estimatedTokens += await this.estimateTokenCount(hostNoteAsSent(hostNote, components), modelTargetInfo.modelId);
@@ -1189,7 +1177,7 @@ export class PromptEngine implements IPromptEngine {
     const reservedTokens = reservedTokensOf(optimized);
     const promptBudget = await this.promptBudgetOf(optimized, modelInfo);
     const sendsThinking = this.thinkingSentFor(optimized.conversationHistory, modelInfo);
-    const sendsToolCalls = toolCallsSentBy(templateName ?? modelInfo.promptFormatType ?? this.config.defaultTemplateName);
+    const sendsToolCalls = this.toolCallsSentBy(templateName ?? modelInfo.promptFormatType ?? this.config.defaultTemplateName);
     let currentTokens = await this.calculateTotalTokens(optimized, modelInfo.modelId, sendsThinking, sendsToolCalls);
     modifications.details!.originalEstimatedTokenCount = currentTokens;
 
@@ -1358,6 +1346,20 @@ export class PromptEngine implements IPromptEngine {
     }
 
     return { optimizedComponents: optimized, modifications, contextTokens: { memory: memoryTokens, otherBefore, otherAfter } };
+  }
+
+  /**
+   * Whether the template a prompt is built with sends an assistant message's tool calls. The built-in Anthropic
+   * template sends an assistant message's content alone, and the built-in generic template writes each message as its
+   * role and content, so neither sends the calls, and the history's count leaves their arguments out there. Every
+   * other template is taken to send them: the OpenAI chat template, and a host's own, a host's own registered under a
+   * built-in's name included.
+   *
+   * @param templateName - The template the prompt is built with.
+   */
+  private toolCallsSentBy(templateName: string | undefined): boolean {
+    const template = templateName ? this.config.availableTemplates[templateName] : undefined;
+    return !template || (template !== this.defaultTemplates.anthropic_messages && template !== this.defaultTemplates.generic_completion);
   }
 
   private async calculateTotalTokens(
