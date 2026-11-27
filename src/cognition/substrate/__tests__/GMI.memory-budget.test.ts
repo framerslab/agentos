@@ -93,18 +93,19 @@ const TIMETABLE_TOOL: ToolDefinitionForLLM = {
 /**
  * A host's own completion gateway: one hop on a model of `window` tokens that answers every request with `answer`
  * and records the options each request was sent with. `toolsSentWithSchema`, when given, is the gateway's own answer
- * to whether a request with a response schema keeps its tools; a gateway written before the member has none.
+ * to whether a request with a response schema keeps its tools; a gateway written before the member has none. The hop
+ * reports `providerId`, which says nothing of how the gateway writes the request it sends.
  */
-function hostGateway(window: number, answer: string, toolsSentWithSchema?: () => boolean) {
+function hostGateway(window: number, answer: string, toolsSentWithSchema?: () => boolean, providerId = 'openai') {
   const sent: Array<Record<string, unknown>> = [];
   const resolution: CompletionResolution = {
-    providerId: 'openai', modelId: 'host-model', hop: 0, maxContextTokens: window,
-    capabilities: ['chat', 'tool_use'], toolFormat: toolFormatFor('openai'), optionOverrides: {},
+    providerId, modelId: 'host-model', hop: 0, maxContextTokens: window,
+    capabilities: ['chat', 'tool_use'], toolFormat: toolFormatFor(providerId), optionOverrides: {},
     providerManager: {
-      getProvider: () => ({ providerId: 'openai', isInitialized: true }),
-      getModelInfo: async () => ({ modelId: 'host-model', providerId: 'openai', contextWindowSize: window, capabilities: ['chat', 'tool_use'] }),
+      getProvider: () => ({ providerId, isInitialized: true }),
+      getModelInfo: async () => ({ modelId: 'host-model', providerId, contextWindowSize: window, capabilities: ['chat', 'tool_use'] }),
     } as never,
-    chain: [{ provider: 'openai', model: 'host-model' }],
+    chain: [{ provider: providerId, model: 'host-model' }],
   };
   const gateway = {
     resolve: async (_route: unknown, after?: CompletionResolution) => (after ? null : resolution),
@@ -415,7 +416,29 @@ describe('GMI memory block beside the response format and passthrough parameters
     expect(capture.budget.effective).toBe(8_000 - capture.budget.fixedPromptTokens!);
   });
 
-  it("passthrough tools and response_format replace the turn's own tools and responseFormat on the wire, so they are counted in their place, once", async () => {
+  it("passthrough tools and response_format replace the turn's own tools and responseFormat on the wire of a built-in provider, so they are counted in their place, once", async () => {
+    mem = await ferryMemory();
+    const { gateway, sent } = servingGateway('openai', 'host-model', 8_000, 'Pier 3.');
+    const toolOrchestrator = { orchestratorId: 'timetable-tools', listAvailableTools: vi.fn(async () => [TIMETABLE_TOOL]), processToolCall: vi.fn() } as unknown as IToolOrchestrator;
+    const { gmi, promptEngine } = await createScriptedGmi({ gateway, config: { cognitiveMemory: mem.manager.forSession(), toolOrchestrator } });
+    const construct = vi.spyOn(promptEngine, 'constructPrompt');
+    const responseFormat = { type: 'json_object' };
+    const customModelParams = {
+      tools: [{ type: 'function', function: { name: TIMETABLE_TOOL.name, description: TIMETABLE_TOOL.description, parameters: TIMETABLE_TOOL.inputSchema } }],
+      response_format: { type: 'json_object' },
+    };
+    await runTurn(gmi, textTurn('t1', 'Which pier does the island ferry leave from?', { options: { responseFormat, customModelParams } } as never));
+    expect(sent).toHaveLength(1);
+    // The GMI hands the gateway the turn's own tools and format; OpenAI's provider writes the passthrough parameters last.
+    expect(tokensOf(JSON.stringify(sent[0].options.tools))).toBeGreaterThan(7_300);
+    expect(sent[0].options.responseFormat).toEqual(responseFormat);
+    expect(sent[0].options.customModelParams).toEqual(customModelParams);
+    const built = construct.mock.calls[0][0] as PromptComponents & { reservedTokens?: number };
+    // Counted once: the turn's tools and format are not sent beside the passthrough parameters that replace them.
+    expect(built.reservedTokens).toBe(tokensOf(JSON.stringify(customModelParams)));
+  });
+
+  it("on a host's own gateway, which may send the passthrough parameters beside the turn's tools and format, all three are counted", async () => {
     mem = await ferryMemory();
     const { gateway, sent } = hostGateway(8_000, 'Pier 3.');
     const toolOrchestrator = { orchestratorId: 'timetable-tools', listAvailableTools: vi.fn(async () => [TIMETABLE_TOOL]), processToolCall: vi.fn() } as unknown as IToolOrchestrator;
@@ -428,13 +451,13 @@ describe('GMI memory block beside the response format and passthrough parameters
     };
     await runTurn(gmi, textTurn('t1', 'Which pier does the island ferry leave from?', { options: { responseFormat, customModelParams } } as never));
     expect(sent).toHaveLength(1);
-    // The GMI hands the gateway the turn's own tools and format; a provider writes the passthrough parameters last.
-    expect(tokensOf(JSON.stringify(sent[0].tools))).toBeGreaterThan(7_300);
-    expect(sent[0].responseFormat).toEqual(responseFormat);
-    expect(sent[0].customModelParams).toEqual(customModelParams);
+    const toolTokens = tokensOf(JSON.stringify(sent[0].tools));
+    expect(toolTokens).toBeGreaterThan(7_300);
     const built = construct.mock.calls[0][0] as PromptComponents & { reservedTokens?: number };
-    // Counted once: the turn's tools and format are not sent beside the passthrough parameters that replace them.
-    expect(built.reservedTokens).toBe(tokensOf(JSON.stringify(customModelParams)));
+    // The gateway's serializer is unknown: the passthrough parameters may ride beside what they would replace.
+    expect(built.reservedTokens, 'the reservation beside the turn tools, its format and the passthrough parameters').toBe(
+      toolTokens + tokensOf(JSON.stringify(responseFormat)) + tokensOf(JSON.stringify(customModelParams)),
+    );
   });
 });
 
@@ -590,5 +613,31 @@ describe('GMI request beside a response format a host gateway forwards on a resp
     const toolTokens = Array.isArray(sent[0].tools) && sent[0].tools.length > 0 ? tokensOf(JSON.stringify(sent[0].tools)) : 0;
     const built = construct.mock.calls[0][0] as PromptComponents & { reservedTokens?: number };
     expect(built.reservedTokens ?? 0, `the reservation, beside a forwarded format of ${formatTokens} tokens`).toBe(toolTokens + (counted ? formatTokens : 0));
+  });
+});
+
+describe("GMI request beside passthrough parameters on a host's own gateway, whose serializer is unknown", () => {
+  it.each([
+    { providerId: 'gemini', key: 'response_format' },
+    { providerId: 'anthropic', key: 'response_format' },
+    { providerId: 'openai', key: 'generationConfig' },
+  ])("a host gateway whose hop reports $providerId counts a passthrough $key whole, where that provider's own request would leave it out", async ({ providerId, key }) => {
+    // A host gateway that posts the options to an OpenAI-compatible endpoint, the passthrough parameters at the
+    // request's root, whatever provider its hop names: the provider's own strip of them says nothing of its request.
+    const { gateway, sent } = hostGateway(8_000, 'Pier 3.', undefined, providerId);
+    const { gmi, promptEngine } = await createScriptedGmi({ gateway });
+    const construct = vi.spyOn(promptEngine, 'constructPrompt');
+    const schema = { type: 'object', description: TIMETABLE_TOOL.description, properties: { pier: { type: 'string' } } };
+    const customModelParams = key === 'response_format'
+      ? { response_format: { type: 'json_schema', json_schema: { name: 'answer', schema } } }
+      : { generationConfig: { responseMimeType: 'application/json', responseSchema: schema } };
+    await runTurn(gmi, textTurn('t1', 'Which pier does the island ferry leave from?', { options: { customModelParams } } as never));
+    expect(sent).toHaveLength(1);
+    expect(sent[0].customModelParams).toEqual(customModelParams);
+    const passthroughTokens = await promptEngine.estimateTokenCount(JSON.stringify(customModelParams), 'host-model');
+    expect(passthroughTokens).toBeGreaterThan(7_300);
+    const toolTokens = Array.isArray(sent[0].tools) && sent[0].tools.length > 0 ? await promptEngine.estimateTokenCount(JSON.stringify(sent[0].tools), 'host-model') : 0;
+    const built = construct.mock.calls[0][0] as PromptComponents & { reservedTokens?: number };
+    expect(built.reservedTokens ?? 0, `the reservation beside ${passthroughTokens} tokens of passthrough parameters`).toBe(toolTokens + passthroughTokens);
   });
 });

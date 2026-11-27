@@ -852,4 +852,50 @@ describe("agent({ runtime: 'gmi' }) earlier history that holds tool rounds", () 
       await a.close();
     }
   });
+
+  it("a Gemini thought signature is not counted on an OpenAI hop, whose request leaves it out: earlier rounds that fit are kept", async () => {
+    ids.next = 0;
+    const WINDOW = 8_000;
+    // History recorded on Gemini: each tool call carries the opaque signature Gemini returned with it, about 3,000
+    // tokens here, which the history keeps for a later Gemini hop. OpenAI's request sends each call's id, type and
+    // function alone, so each round is about 60 tokens on that hop's wire.
+    const SIGNED = Array.from({ length: 2 }, (_, i) => [
+      { role: 'user', content: `Earlier crossing question ${i}: log the crossing.` },
+      {
+        role: 'assistant',
+        content: null,
+        tool_calls: [{ id: `call-${i}`, type: 'function', function: { name: 'log_crossing', arguments: JSON.stringify({ crossing: i }) }, thoughtSignature: `sig-${i}-${'A'.repeat(12_000)}` }],
+      },
+      { role: 'tool', tool_call_id: `call-${i}`, content: `Logged crossing ${i}.` },
+      { role: 'assistant', content: `Crossing ${i} is logged.` },
+    ]).flat();
+    const k = key(); const emb = key();
+    const s = script('openai', k, { window: WINDOW, replies: [reply.text('Pier 3.')] });
+    script('openai', emb, { replies: [] });
+    vi.stubEnv('OPENAI_API_KEY', emb);
+    const a = withRecall(k);
+    try {
+      const session = a.session('s');
+      session.reseed(SIGNED as never);
+      const result = (await session.send(QUESTION)) as { historyOmitted?: { messages: number; tokens: number } };
+
+      expect(result.historyOmitted, 'the earlier rounds, whose calls the OpenAI hop sends without their signatures').toBeUndefined();
+      const request = s.seen[0];
+      expect(request, 'the question reached the model').toBeDefined();
+      for (const id of ['call-0', 'call-1']) {
+        expect(request.messages.some((message) => message.role === 'tool' && message.tool_call_id === id), `the result of ${id}`).toBe(true);
+      }
+      // The request as OpenAI's builder writes it (each call's id, type and function) fits the model's context.
+      const calls = request.messages.filter((message) => Array.isArray(message.tool_calls) && message.tool_calls.length > 0);
+      const texts = request.messages.flatMap(textPartsOf).reduce((sum, text) => sum + engineTokensOf(text), 0);
+      const callTokens = calls.reduce(
+        (sum, message) => sum + engineTokensOf(JSON.stringify((message.tool_calls ?? []).map(({ id, type, function: fn }) => ({ id, type, function: fn })))),
+        0,
+      );
+      const beside = besideOf(s, 0);
+      expect(texts + callTokens + beside.tools + beside.payload).toBeLessThanOrEqual(WINDOW);
+    } finally {
+      await a.close();
+    }
+  });
 });
