@@ -361,8 +361,8 @@ describe('the recall capture of a memory assembly', () => {
 
 describe("recall capture 'off'", () => {
   /**
-   * A GMI's bridge over `manager`, its user `u1`, with each assembly asked at `budget` tokens instead of the bridge's
-   * 1600; returns the details of each "Cognitive memory context assembled." entry the bridge traces.
+   * A GMI's bridge over `manager`, its user `u1`, with each assembly asked at `budget` tokens instead of the manager's
+   * configured budget; returns the details of each "Cognitive memory context assembled." entry the bridge traces.
    */
   function bridgeOver(manager: CognitiveMemoryManager, budget: number) {
     const entries: Array<Record<string, unknown>> = [];

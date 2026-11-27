@@ -161,7 +161,8 @@ describe('the recall capture on the runtime stream', () => {
 
   it("with recall.capture 'metadata+stream' the stream carries one memorySources update per turn and the final response its memoryRecall; recall.traceIds lists the ids in the trace entry", async () => {
     vi.spyOn(console, 'log').mockImplementation(() => undefined);
-    const agentos = await boot({ capture: 'metadata+stream', traceIds: true });
+    // A block of 1,600 tokens, written out with the retrieval and rerank it runs beside: the records below read it.
+    const agentos = await boot({ retrieval: 'dense', rerank: 'none', budget: { totalTokens: 1600 }, capture: 'metadata+stream', traceIds: true });
     await turn(agentos, 's-stream', SAID);
     const chunks = await turn(agentos, 's-stream', ASKED);
 

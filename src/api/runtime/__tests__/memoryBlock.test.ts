@@ -2,7 +2,8 @@
  * The memory block a GMI's cognitive memory puts in the prompt each turn, read
  * through the real path: a CognitiveMemoryManager built from agent options over
  * the in-memory stores, recalled by `assembleForPrompt` and by the
- * CognitiveMemoryBridge a GMI uses (which asks for a 1600-token block).
+ * CognitiveMemoryBridge a GMI uses (which asks for the block the manager's
+ * `recall.budget.totalTokens` sets: 1,600 tokens in the case that reads it).
  * Embeddings are a word hash, so texts that share words recall each other.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -10,6 +11,7 @@ import { createAgentCognitiveMemory } from '../agentCognitiveMemory.js';
 import { CognitiveMemoryBridge } from '../../../cognition/substrate/CognitiveMemoryBridge.js';
 import { GMIMood } from '../../../cognition/substrate/IGMI';
 import type { ICognitiveMemoryManager } from '../../../cognition/memory/CognitiveMemoryManager.js';
+import type { MemoryRecallConfig } from '../../../cognition/memory/core/config.js';
 
 const DIM = 64;
 
@@ -45,13 +47,16 @@ const STYLE_TRAITS = {
   emotional: { emotionality: 0.9, conscientiousness: 0.2, openness: 0.2 },
 } as const;
 
-function memoryWith(traits: Record<string, number>) {
+function memoryWith(traits: Record<string, number>, recall?: MemoryRecallConfig) {
   const persona = {
     id: 'memo', name: 'Memo', description: 'd', version: '1.0.0', baseSystemPrompt: 'x',
     personalityTraits: traits,
   } as never;
-  return createAgentCognitiveMemory({ persona, memory: {}, embeddingManager: makeEmbedder() as never });
+  return createAgentCognitiveMemory({ persona, memory: recall ? { recall } : {}, embeddingManager: makeEmbedder() as never });
 }
+
+/** What a memory with no recall setting ran while the default budget was 1,600 tokens, written out as a setting. */
+const EARLIER_DEFAULTS: MemoryRecallConfig = { retrieval: 'dense', rerank: 'none', budget: { totalTokens: 1600 } };
 
 const neutral = { valence: 0, arousal: 0, dominance: 0 };
 const DAY_MS = 86_400_000;
@@ -118,7 +123,7 @@ describe('memory block: ages count days and carry the date', () => {
 
 describe('memory block: the budget an empty section leaves flows to the sections with content', () => {
   it('a store of episodic traces alone fills the 1600-token block the GMI asks for with whole traces, never more', async () => {
-    const mem = await memoryWith(STYLE_TRAITS.structured);
+    const mem = await memoryWith(STYLE_TRAITS.structured, EARLIER_DEFAULTS);
     try {
       const places = ['north ridge', 'cedar lake', 'river bend', 'pine hollow', 'stone bridge', 'fern valley', 'quarry pond', 'old mill', 'red cliffs', 'birch grove', 'salt marsh', 'echo canyon', 'willow creek', 'granite peak'];
       for (const [i, place] of places.entries()) {

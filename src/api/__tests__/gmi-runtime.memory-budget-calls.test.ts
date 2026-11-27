@@ -133,7 +133,8 @@ describe("agent({ runtime: 'gmi' }) with cognitive memory on", () => {
     vi.stubEnv('OPENAI_API_KEY', emb);
     const a = agent({
       runtime: 'gmi', name: 'Lockers', provider: 'openai', model: 'stub-model', apiKey: k, fallbackProviders: [],
-      cognition: { memory: { embedding: { provider: 'openai' }, recall: { capture: 'metadata+stream' } }, mechanisms: false },
+      // The 1,600-token selection, written out: the record below reads the budget it was asked for.
+      cognition: { memory: { embedding: { provider: 'openai' }, recall: { retrieval: 'dense', rerank: 'none', budget: { totalTokens: 1600 }, capture: 'metadata+stream' } }, mechanisms: false },
     } as unknown as AgentOptions);
     try {
       const session = a.session('s');

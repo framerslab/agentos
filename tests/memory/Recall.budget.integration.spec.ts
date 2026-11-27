@@ -12,6 +12,7 @@ import { createAgentCognitiveMemory } from '../../src/api/runtime/agentCognitive
 import { CognitiveMemoryBridge } from '../../src/cognition/substrate/CognitiveMemoryBridge.js';
 import { GMIMood } from '../../src/cognition/substrate/IGMI.js';
 import type { ICognitiveMemoryManager } from '../../src/cognition/memory/CognitiveMemoryManager.js';
+import type { MemoryRecallConfig } from '../../src/cognition/memory/core/config.js';
 import { effectiveRecallBudget } from '../../src/cognition/memory/retrieval/recall/budget.js';
 import { MEMORY_CUT_MARKER } from '../../src/cognition/memory/core/prompt/MemoryFormatters.js';
 import { resetLoggerFactory, setLogger } from '../../src/core/logging/loggerFactory.js';
@@ -44,12 +45,15 @@ function makeEmbedder() {
   };
 }
 
-function memoryWith() {
+/** What a memory with no recall setting ran while the default budget was 1,600 tokens, written out as a setting. */
+const EARLIER_DEFAULTS: MemoryRecallConfig = { retrieval: 'dense', rerank: 'none', budget: { totalTokens: 1600 } };
+
+function memoryWith(recall?: MemoryRecallConfig) {
   const persona = {
     id: 'memo', name: 'Memo', description: 'd', version: '1.0.0', baseSystemPrompt: 'x',
     personalityTraits: { conscientiousness: 0.9, openness: 0.2, emotionality: 0.2 },
   } as never;
-  return createAgentCognitiveMemory({ persona, memory: {}, embeddingManager: makeEmbedder() as never });
+  return createAgentCognitiveMemory({ persona, memory: recall ? { recall } : {}, embeddingManager: makeEmbedder() as never });
 }
 
 const neutral = { valence: 0, arousal: 0, dominance: 0 };
@@ -170,7 +174,8 @@ describe('CognitiveMemoryBridge.contextForHop', () => {
   it('a manager without reassembleForBudget is asked again through assembleForPrompt at the lower budget, with the same query and scopes', async () => {
     const calls: Array<{ query: string; budget: number; scopes: unknown }> = [];
     const custom = {
-      getConfig: () => ({ agentId: 'memo' }),
+      // The bridge asks for the manager's configured budget first: 1,600 here, as a setting.
+      getConfig: () => ({ agentId: 'memo', recall: EARLIER_DEFAULTS }),
       assembleForPrompt: async (query: string, budget: number, _mood: unknown, options: { scopes?: unknown }) => {
         calls.push({ query, budget, scopes: options.scopes });
         const text = 'x'.repeat(Math.min(1000, budget) * 4);
@@ -187,7 +192,7 @@ describe('CognitiveMemoryBridge.contextForHop', () => {
   });
 
   it('a hop whose share holds the block takes it as assembled; an invalid input skips the clamp with one line; a remainder of 0 sends no block with one line', async () => {
-    const mem = await memoryWith();
+    const mem = await memoryWith(EARLIER_DEFAULTS);
     try {
       for (let i = 0; i < 6; i++) await mem.manager.encode(`Trail journal entry ${i}: the overlook had the best view.`, neutral, 'neutral', { type: 'episodic' });
       const bridge = bridgeOver(mem.manager);

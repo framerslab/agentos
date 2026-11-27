@@ -15,7 +15,8 @@
  *
  * agent() builds the persona from its options, which set no
  * `cognitiveMemoryConfig` but `recall` (from `memory.recall`, which these cases
- * leave unset); a case that needs one sets `personaMemory.config`,
+ * set to dense retrieval, no rerank and a block of 1,600 tokens, the block
+ * their statements are sized against); a case that needs one sets `personaMemory.config`,
  * and the persona agent() builds carries it, so the case reads what
  * createAgentCognitiveMemory makes of a persona's memory settings on this path.
  */
@@ -91,7 +92,13 @@ const STYLE_TRAITS = {
   emotional: { emotionality: 0.9, conscientiousness: 0.2, openness: 0.2 },
 } as const;
 
-/** An agent whose sessions share cognitive memory (no mechanisms) that embeds through OpenAI, with the given traits. */
+/** What a memory with no recall setting ran while the default budget was 1,600 tokens, written out as a setting. */
+const EARLIER_DEFAULTS = { retrieval: 'dense', rerank: 'none', budget: { totalTokens: 1600 } } as const;
+
+/**
+ * An agent whose sessions share cognitive memory (no mechanisms) that embeds through OpenAI, with the given traits and
+ * a memory block of 1,600 tokens.
+ */
 const withMemory = (apiKey: string, personality: Record<string, number> = STYLE_TRAITS.structured) =>
   agent({
     runtime: 'gmi',
@@ -100,7 +107,7 @@ const withMemory = (apiKey: string, personality: Record<string, number> = STYLE_
     apiKey,
     fallbackProviders: [],
     personality,
-    cognition: { memory: { embedding: { provider: 'openai' } }, mechanisms: false },
+    cognition: { memory: { embedding: { provider: 'openai' }, recall: EARLIER_DEFAULTS }, mechanisms: false },
   } as unknown as AgentOptions);
 
 /** Starts every memory block (the assembler's preamble). */

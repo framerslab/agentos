@@ -789,6 +789,18 @@ On `anthropic`, the newest user message of that turn's request holds:
 
 A host that is handed an AgentOS module checks for the root export `APPLICATION_NOTE_INPUT_FIELD`, whose value is `'applicationNote'`, to learn whether that module carries the field.
 
+### Upgrading from 0.21.2 or earlier
+
+- The memory block's default budget is 6,400 tokens; through 0.21.2 it was 1,600. A memory that sets no `recall.budget.totalTokens` takes it: `memory.recall` on `agent({ runtime: 'gmi' })` and `gmi()`, a persona's `cognitiveMemoryConfig.recall`, and the `recall` of a manager a host of `AgentOS.create()` builds in `gmiManagerConfig.cognitiveMemoryFactory`. The other recall defaults are unchanged: `retrieval` is `'dense'`, `rerank` is `'none'` and `capture` is `'metadata'`, so a turn's recall finds the same candidates in the same order and calls no new provider.
+- What a host sees: a turn's memory block holds up to 6,400 tokens where the model's retrieved-context share allows it ([Budget and the prompt share](#budget-and-the-prompt-share)). A memory whose recall filled the 1,600 sends up to 4,800 more prompt tokens in the request that carries the block, and the block shows memories the smaller one left out. The turn's record reads `budget.requested: 6400`. On a model whose share leaves less than 6,400 (a context under 32,000 tokens, or a turn with other retrieved context), the record's `budget.effective` is what the share leaves, with `clampReason: 'prompt_share'`, and a block over it is rendered again at it from the turn's one recall, with one `memory.recall.budget_clamped` line: a model of 8,000 tokens of context still takes at most 1,600. A memory that sets `budget.totalTokens` is unchanged. So are the default runtime, whose memory provider keeps `memoryProviderOptions.tokenBudget` (2,000 by default), and a direct `assembleForPrompt()` call, which passes its own budget.
+- To keep the earlier block, set the budget: `memory: { recall: { budget: { totalTokens: 1600 } } }` on `agent()` and `gmi()` (inside `cognition.memory` where the agent sets one of its own), or `recall: { budget: { totalTokens: 1600 } }` on a manager.
+- Two settings send the model no memory block:
+  - **Memory off for the agent.** `memory: false` on `agent({ runtime: 'gmi' })` and `gmi()`; on the default `light` profile an agent that sets no `memory` has none, and an agent whose `cognition` is a config with a `memory` of its own sets `cognition: { memory: false }`. A host of `AgentOS.create()` passes no `gmiManagerConfig.cognitiveMemoryFactory`, or returns nothing from it for a session. The agent, or that session's GMI, then has no cognitive memory: its turns file nothing into it and recall nothing from it.
+  - **A budget of 0.** `memory: { recall: { budget: { totalTokens: 0 } } }`, or `recall: { budget: { totalTokens: 0 } }` on a manager. The memory still files each turn and runs its recall, the turn's record lists every candidate left out for the budget, and no block is sent ([Recall Budget](#recall-budget)).
+
+  Both act on cognitive memory. What a host's own `memoryProvider.getContext` returns, and a souled agent's `<memory_recall>` block, follow their own settings ([`souledAgent()`](../getting-started/HIGH_LEVEL_API.md#souledagent-soul-plus-a-memory-wiki)).
+- Whether memory is on for a user is the host's decision, made for each user. Laws may require cross-conversation memory to be off by default for minors (for example, California Business and Professions Code section 21812, operative 1 July 2027), and the library does not know a user's age.
+
 ### Upgrading from 0.19.0 or earlier
 
 - A memory rerank (`recall.rerank`) whose call answers after `timeoutMs` is a timeout, however the call took that long. Through 0.19.0 a provider that holds the calling thread for its whole pass, as the `local` cross-encoder does, won the race against its own deadline: its answer was used, the capture read `{ provider: 'local', ..., ms }` with an `ms` past `timeoutMs`, and it never counted toward the back-off. Now its order is dropped and the recall keeps its own order, the capture reads `{ provider: 'none', reason: 'timeout' }`, one `memory.recall.rerank_skipped` line is written, and three in a row skip the reranker for 60 seconds (`backoff`). A host on `{ kind: 'local' }` at the default `timeoutMs` (1,500 ms) whose pass takes 2.3 s got a reranked block on 0.19.0; it now gets the block in recall order, and from the fourth turn the reason `backoff`. The time is counted from the moment the recall calls the reranker, so a pass that waits behind other work on the thread counts that wait too. A host whose passes run longer than `timeoutMs` and that wants them used raises `timeoutMs` above its pass time (at most 2,147,483,647). An `llm` rerank, whose call yields while its model answers, times out at its deadline as before.
@@ -840,7 +852,7 @@ A host that is handed an AgentOS module checks for the root export `APPLICATION_
 
 ### Upgrading from 0.15.124 or earlier
 
-- `memory.recall` on `agent()` and `gmi()` sets the memory block's budget (`budget.totalTokens`, the whole block, 1,600 by default) and the capture (`capture`, `'metadata'` by default), and the GMI's memory bridge asks for the manager's `recall.budget.totalTokens` in place of a fixed 1,600. With none set the block is the same byte for byte. See [Recall Budget](#recall-budget).
+- `memory.recall` on `agent()` and `gmi()` sets the memory block's budget (`budget.totalTokens`, the whole block; 1,600 by default through 0.21.2, 6,400 after it) and the capture (`capture`, `'metadata'` by default), and the GMI's memory bridge asks for the manager's `recall.budget.totalTokens` in place of a fixed 1,600. With none set the block is the same byte for byte. See [Recall Budget](#recall-budget).
 - `CognitiveMemoryManager.initialize()` and `createAgentCognitiveMemory()` refuse a `recall` that holds a value of the wrong kind, or that is not an object or holds a `budget` that is not one, with a `RecallOptionError` naming the field. Through 0.15.124 they took any value.
 - `createAgentCognitiveMemory()` puts `memory.recall` over the persona's `cognitiveMemoryConfig.recall` field by field, `budget.totalTokens` included: an agent budget that leaves the total unset keeps the persona's.
 - On a GMI agent with cognitive memory on, `memoryProviderOptions.tokenBudget` never sized the memory block; when it is set and no `memoryProvider.getContext` reads it, the agent's construction writes one `memory.recall.option_ignored` line (`option: 'token_budget'`). On the default runtime, or with memory off, a `memory.recall.budget.totalTokens` that no `memoryProvider.getContext` reads writes one with `option: 'recall_budget'`.
@@ -906,7 +918,7 @@ await manager.initialize({ ...config, recall: { budget: { totalTokens: 2400 }, r
 
 | Field | Values | Default | What it changes |
 |---|---|---|---|
-| `budget.totalTokens` | An integer of at least 0 | 1,600 | The size of the whole memory block a GMI turn sends, its preamble included ([Recall Budget](#recall-budget)) |
+| `budget.totalTokens` | An integer of at least 0 | 6,400 | The size of the whole memory block a GMI turn sends, its preamble included; a model whose retrieved-context share holds less is sent a smaller block ([Recall Budget](#recall-budget)) |
 | `retrieval` | `'dense'`, `'hybrid'` | `'dense'` | How a turn finds its memories, and whether the block shows them in two sections or in one (the legs, the pool and the rules below) |
 | `rerank` | `'none'`, `{ kind: 'local', model, revision }`, `{ kind: 'llm', invoke, model }` | `'none'` | Whether a model reorders the recall's best candidates before the block is assembled (Rerank, below, and [Memory rerank](../text/RERANKING.md#memory-rerank)) |
 | `capture` | `'metadata'`, `'metadata+stream'`, `'off'` | `'metadata'` | What a turn records of its recall and where the record goes, never what the block holds ([Recall Capture](#recall-capture)) |
@@ -1005,7 +1017,7 @@ The reranker scores the recall's best 20 candidates (`maxCandidates`) against th
 
 ## Recall Budget
 
-A GMI's memory bridge assembles each turn's block within the manager's `recall.budget.totalTokens`: the whole block, the preamble included, in tokens of about four characters. Unset, it is 1,600 (`DEFAULT_RECALL_BUDGET_TOKENS`), the budget the bridge asked for before the setting existed, so a manager that sets none assembles the same block. At 0 the turn sends no block and its capture records every candidate left out with the reason `budget`; the turn goes on.
+A GMI's memory bridge assembles each turn's block within the manager's `recall.budget.totalTokens`: the whole block, the preamble included, in tokens of about four characters. Unset, it is 6,400 (`DEFAULT_RECALL_BUDGET_TOKENS`). A model whose retrieved-context share holds less is sent a smaller block ([Budget and the prompt share](#budget-and-the-prompt-share)): a block fills the whole 6,400 only where 20% of the model's context, less the turn's other retrieved context, is at least 6,400, which for a turn with no other retrieved context is a model of 32,000 tokens of context. At 0 the turn sends no block and its capture records every candidate left out with the reason `budget`; the turn goes on, and the memory still files the turn and runs its recall.
 
 ```typescript
 await manager.initialize({ ...config, recall: { budget: { totalTokens: 2400 } } });
@@ -1024,7 +1036,7 @@ PromptEngine gives retrieved context 20% of a model's context (`PROMPT_CONTEXT_S
 effective = max(0, min(budget.totalTokens, floor(0.20 × context) − other context))
 ```
 
-An 8,000-token model has a share of 1,600 tokens. A turn with 1,400 tokens of long-term-memory text leaves 200 for memory, so the block, assembled at 1,600, is rendered again at 200: the same candidates and sections through the assembler alone (`reassembleForBudget`), with no retrieval, embedding or rerank call, and the memories that do not fit drop whole. The other context is sized with the assembler's estimate of about four characters a token. PromptEngine counts with its own estimate, 3.8 characters a token for a model id containing `gpt-4` and 4.2 for one containing `claude`, so on a `gpt-4` model a block and other context that the clamp fit into the share can be over it by PromptEngine's count: the difference comes from the other context, never the block, and the record's `delivery.otherContext.cutBy` names the cut.
+An 8,000-token model has a share of 1,600 tokens. A turn with 1,400 tokens of long-term-memory text leaves 200 for memory, so a block of more than 200 tokens, assembled at the default 6,400, is rendered again at 200: the same candidates and sections through the assembler alone (`reassembleForBudget`), with no retrieval, embedding or rerank call, and the memories that do not fit drop whole. With no other retrieved context the same model takes at most its whole share, 1,600 tokens, of the 6,400. The other context is sized with the assembler's estimate of about four characters a token. PromptEngine counts with its own estimate, 3.8 characters a token for a model id containing `gpt-4` and 4.2 for one containing `claude`, so on a `gpt-4` model a block and other context that the clamp fit into the share can be over it by PromptEngine's count: the difference comes from the other context, never the block, and the record's `delivery.otherContext.cutBy` names the cut.
 
 - A hop whose share holds the block gets the turn's first rendering unchanged.
 - Each fallback hop is sized for its own model, always from the turn's first rendering and its one recall: a turn whose primary fails before any output and whose fallback has a smaller context sends the fallback a smaller block, and a fallback with a larger context gets the first rendering whole.
@@ -1136,11 +1148,11 @@ A GMI turn's record measures the block with two estimates:
 
 The budget is kept in the assembler's count: `tokensUsed` counts the block's headers and separators and never exceeds the budget ([`MemoryPromptAssembler.ts` L518-L519](https://github.com/framerslab/agentos/blob/f181338e45e19bde535541b1a614f20182ccd0d8/src/cognition/memory/core/prompt/MemoryPromptAssembler.ts#L518-L519)), so a block assembled at a budget of `N` tokens holds at most `4 × N` characters. PromptEngine counts the same text with its own divisor ([`PromptEngine.ts` L1125-L1127](https://github.com/framerslab/agentos/blob/f181338e45e19bde535541b1a614f20182ccd0d8/src/core/llm/PromptEngine.ts#L1125-L1127)), and the GMI writes that count into the record ([`GMI.ts` L2247](https://github.com/framerslab/agentos/blob/f181338e45e19bde535541b1a614f20182ccd0d8/src/cognition/substrate/GMI.ts#L2247)):
 
-- On a model id that contains `gpt-4`, `delivery.memoryBlockTokens` reads up to about 5.3% above `tokensUsed` (4 / 3.8). A block that fills a 1,600-token budget reads up to 1,685, and one that fills a 6,400-token budget up to 6,737. The block is within its budget, and the record's delivery count can be above the budget's figure.
+- On a model id that contains `gpt-4`, `delivery.memoryBlockTokens` reads up to about 5.3% above `tokensUsed` (4 / 3.8). A block that fills the default 6,400-token budget reads up to 6,737, and one that fills a 1,600-token budget up to 1,685. The block is within its budget, and the record's delivery count can be above the budget's figure.
 - On a model id that contains `claude`, it reads at or under `tokensUsed` (4.2 characters a token against 4).
 - On any other model id both estimates divide by four, and it reads at or under `tokensUsed`.
 
-To hold `delivery.memoryBlockTokens` at or under a figure `T` on a `gpt-4` model, set `budget.totalTokens` to `floor(T × 0.95)`: the block then holds at most `3.8 × T` characters, which PromptEngine counts as at most `T`. For 1,600 that budget is 1,520. On every other model id the budget itself bounds the count.
+To hold `delivery.memoryBlockTokens` at or under a figure `T` on a `gpt-4` model, set `budget.totalTokens` to `floor(T × 0.95)`: the block then holds at most `3.8 × T` characters, which PromptEngine counts as at most `T`. For 6,400 that budget is 6,080, and for 1,600 it is 1,520. On every other model id the budget itself bounds the count.
 
 Two things stay outside both counts and the budget. The fixed line that opens the note ([Where the block goes in the request](#where-the-block-goes-in-the-request)) is 107 characters with its line break ([`PromptEngine.ts` L150-L169](https://github.com/framerslab/agentos/blob/f181338e45e19bde535541b1a614f20182ccd0d8/src/core/llm/PromptEngine.ts#L150-L169)). And the labels `Source: cognitive_memory` and `Content:` are counted with the block only for a host that calls PromptEngine itself with its other retrieved context as a list ([`PromptEngine.ts` L127-L130](https://github.com/framerslab/agentos/blob/f181338e45e19bde535541b1a614f20182ccd0d8/src/core/llm/PromptEngine.ts#L127-L130)); a GMI passes that context as one string ([`GMI.ts` L2006](https://github.com/framerslab/agentos/blob/f181338e45e19bde535541b1a614f20182ccd0d8/src/cognition/substrate/GMI.ts#L2006)), so its record counts the block's text alone.
 
@@ -1252,7 +1264,7 @@ interface CognitiveMemoryConfig {
 }
 
 interface ManagerRecallConfig {
-  budget?: { totalTokens?: number };           // Default: 1600, the whole block (see Recall Budget)
+  budget?: { totalTokens?: number };           // Default: 6400, the whole block (see Recall Budget)
   capture?: 'metadata' | 'metadata+stream' | 'metadata+text' | 'off'; // Default: 'metadata' (see Recall Capture)
   retrieval?: 'dense' | 'hybrid';              // Default: 'dense' (see Recall)
   rerank?:                                     // Default: 'none' (see Recall, Rerank)
@@ -1393,7 +1405,7 @@ A GMI with cognitive memory calls the manager through [`CognitiveMemoryBridge`](
 // Before the turn's first model call, with the user's message as the query:
 const memoryContext = await cognitiveMemory.assembleForPrompt(
   userMessage,
-  cognitiveMemory.getConfig().recall?.budget?.totalTokens ?? 1600, // token budget: the configured budget, 1,600 by default
+  cognitiveMemory.getConfig().recall?.budget?.totalTokens ?? 6400, // token budget: the configured budget, 6,400 by default
   mood,
   { scopes }, // the scopes of the turn's user, session, conversation, persona and organization
 );

@@ -488,7 +488,7 @@ export interface CognitiveMemoryConfig {
    * `gmiManagerConfig.cognitiveMemoryFactory` builds; `agent()` and `gmi()`
    * set it from `memory.recall`.
    *
-   * @default undefined (a 1600-token block, capture `'metadata'`, no ids in the reasoning trace)
+   * @default undefined (a 6400-token block, dense retrieval, no rerank, capture `'metadata'`, no ids in the reasoning trace)
    */
   recall?: ManagerRecallConfig;
 }
@@ -504,9 +504,11 @@ export interface MemoryRecallConfig {
    * 0; at 0 the turn sends no block and records every candidate left out for
    * the budget. On `agent()` without `runtime: 'gmi'` it is the `tokenBudget`
    * handed to `memoryProvider.getContext` when
-   * `memoryProviderOptions.tokenBudget` is unset.
+   * `memoryProviderOptions.tokenBudget` is unset. The default is the GMI
+   * turn's: a model whose retrieved-context share holds less is sent a
+   * smaller block.
    *
-   * @default { totalTokens: 1600 }
+   * @default { totalTokens: 6400 }
    */
   budget?: { totalTokens?: number };
   /**

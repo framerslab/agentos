@@ -489,7 +489,7 @@ export class CognitiveMemoryBridge {
    * Assembles a cognitive memory context suitable for injection into the LLM prompt.
    *
    * Queries the memory store for relevant traces, assembles them into a text
-   * block within the manager's `recall.budget.totalTokens` (1600 tokens when
+   * block within the manager's `recall.budget.totalTokens` (6400 tokens when
    * unset, the preamble included), and returns the assembled context.
    * Retrieval is limited to the scopes returned by
    * {@link CognitiveMemoryBridge.buildRetrievalScopes}, so a memory backend
@@ -521,7 +521,7 @@ export class CognitiveMemoryBridge {
       }
       // On a souled agent's mind, what the recall reads drifts only where the turn's answer says it may.
       const skipReconsolidation = this.isMindManager() && turn?.soulAnswer?.reconsolidation !== true;
-      // The manager's recall.budget.totalTokens, 1600 when unset: the whole block, its preamble included.
+      // The manager's recall.budget.totalTokens, 6400 when unset: the whole block, its preamble included.
       const context = await this.cognitiveMemory.assembleForPrompt(
         query,
         recallBudgetTokens(this.recallConfig()),
@@ -572,7 +572,7 @@ export class CognitiveMemoryBridge {
     }
   }
 
-  /** The configured budget of the memory block: the manager's `recall.budget.totalTokens`, 1600 when unset. */
+  /** The configured budget of the memory block: the manager's `recall.budget.totalTokens`, 6400 when unset. */
   public budgetTokens(): number {
     return recallBudgetTokens(this.recallConfig());
   }

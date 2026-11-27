@@ -140,7 +140,7 @@ export interface MemoryConfig {
   persistAccessState?: boolean;
   /**
    * Recall settings for cognitive memory on the GMI path (`gmi()`, `agent({ runtime: 'gmi' })`):
-   * `budget.totalTokens` sizes the memory block (default 1600, preamble included), `capture` sets what a turn
+   * `budget.totalTokens` sizes the memory block (default 6400, preamble included), `capture` sets what a turn
    * records about its recall (default `'metadata'`), and `retrieval` sets how a turn finds its memories (default
    * `'dense'`, by meaning; `'hybrid'` adds the turn's exact words and recency, fused into one Relevant Memories
    * section), and `rerank` reranks the recalled memories (default `'none'`; `{ kind: 'local' }` scores with a

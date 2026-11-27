@@ -183,11 +183,13 @@ describe('resolveRecallOptions', () => {
 });
 
 describe('recallBudgetTokens', () => {
-  it('is the configured total, 1600 when unset, and 0 when set to 0', () => {
-    expect(DEFAULT_RECALL_BUDGET_TOKENS).toBe(1600);
-    expect(recallBudgetTokens(undefined)).toBe(1600);
-    expect(recallBudgetTokens({})).toBe(1600);
-    expect(recallBudgetTokens({ budget: {} })).toBe(1600);
+  it('is the configured total, 6400 when unset, and 0 when set to 0', () => {
+    expect(DEFAULT_RECALL_BUDGET_TOKENS).toBe(6400);
+    expect(recallBudgetTokens(undefined)).toBe(6400);
+    expect(recallBudgetTokens({})).toBe(6400);
+    expect(recallBudgetTokens({ budget: {} })).toBe(6400);
+    // The earlier default, as a setting.
+    expect(recallBudgetTokens({ retrieval: 'dense', rerank: 'none', budget: { totalTokens: 1600 } })).toBe(1600);
     expect(recallBudgetTokens({ budget: { totalTokens: 2400 } })).toBe(2400);
     expect(recallBudgetTokens({ budget: { totalTokens: 0 } })).toBe(0);
   });

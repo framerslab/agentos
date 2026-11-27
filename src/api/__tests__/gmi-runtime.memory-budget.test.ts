@@ -23,6 +23,7 @@ import { globalLLMProviderHealth } from '../../core/safety/LLMProviderHealthRegi
 import { resetLoggerFactory, setLogger } from '../../core/logging/loggerFactory';
 import type { ChatMessage } from '../../core/llm/providers/IProvider';
 import type { MemoryRecallCapture } from '../../cognition/memory/retrieval/recall/capture';
+import { DEFAULT_RECALL_BUDGET_TOKENS } from '../../cognition/memory/retrieval/recall/budget';
 
 let n = 0;
 const key = () => `k-memory-budget-${++n}`;
@@ -86,7 +87,9 @@ const STATEMENTS = Array.from(
 );
 const QUESTION = 'Which pier does the island harbor ferry leave from?';
 
-type Recall = { budget?: { totalTokens?: number }; capture?: 'off' | 'metadata' | 'metadata+stream' };
+type Recall = { budget?: { totalTokens?: number }; capture?: 'off' | 'metadata' | 'metadata+stream'; retrieval?: 'dense' | 'hybrid'; rerank?: 'none' };
+/** What a memory with no recall setting ran while the default budget was 1,600 tokens, written out as a setting. */
+const EARLIER_DEFAULTS: Recall = { retrieval: 'dense', rerank: 'none', budget: { totalTokens: 1600 } };
 /**
  * An agent whose sessions share cognitive memory (no mechanisms) that embeds through OpenAI, with the given recall
  * setting. Named, so its persona id, which each memory line's tags carry, is the same for every agent built here.
@@ -144,13 +147,24 @@ describe("agent({ runtime: 'gmi' }) memory.recall.budget and capture", () => {
     vi.setSystemTime(Date.UTC(2026, 10, 10, 12, 0, 0));
   });
 
-  it('with no recall setting the block is the one a budget of 1600 sends, byte for byte', async () => {
+  it('with no recall setting the block is the one the default budget sends as a setting, byte for byte', async () => {
     const unset = await ask();
-    const explicit = await ask({ budget: { totalTokens: 1600 } });
+    const explicit = await ask({ budget: { totalTokens: DEFAULT_RECALL_BUDGET_TOKENS } });
     expect(unset.block.length).toBeGreaterThan(0);
     expect(explicit.block).toBe(unset.block);
-    expect(unset.memoryRecall?.budget).toMatchObject({ requested: 1600 });
+    expect(unset.memoryRecall?.budget).toMatchObject({ requested: DEFAULT_RECALL_BUDGET_TOKENS });
+    expect(explicit.memoryRecall?.budget).toMatchObject({ requested: DEFAULT_RECALL_BUDGET_TOKENS });
+  });
+
+  it('the earlier defaults as a setting send the block a budget of 1600 alone sends, byte for byte', async () => {
+    const budgetAlone = await ask({ budget: { totalTokens: 1600 } });
+    const explicit = await ask(EARLIER_DEFAULTS);
+    expect(explicit.block.length).toBeGreaterThan(0);
+    expect(explicit.block).toBe(budgetAlone.block);
+    expect(tokensOf(explicit.block)).toBeLessThanOrEqual(1600);
+    expect(budgetAlone.memoryRecall?.budget).toMatchObject({ requested: 1600 });
     expect(explicit.memoryRecall?.budget).toMatchObject({ requested: 1600 });
+    expect(explicit.memoryRecall).toMatchObject({ retrieval: 'dense', reranker: { provider: 'none', reason: 'none_configured' } });
   });
 
   it('budget.totalTokens sizes the whole block, preamble included', async () => {
@@ -185,18 +199,18 @@ describe("agent({ runtime: 'gmi' }) memory.recall.budget and capture", () => {
   });
 
   it("stream(): memoryRecall settles with the record under 'metadata' and undefined under 'off'", async () => {
-    const on = await ask({ capture: 'metadata' }, 'stream');
+    const on = await ask({ ...EARLIER_DEFAULTS, capture: 'metadata' }, 'stream');
     expect(on.text).toBe('Pier 3.');
     expect(on.memoryRecall?.version).toBe('memory-recall-capture/1');
     expect(on.memoryRecall?.budget.requested).toBe(1600);
-    const off = await ask({ capture: 'off' }, 'stream');
+    const off = await ask({ ...EARLIER_DEFAULTS, capture: 'off' }, 'stream');
     expect(off.text).toBe('Pier 3.');
     expect(off.memoryRecall).toBeUndefined();
     expect(off.block).toBe(on.block);
   });
 
   it('stream(): a turn whose model call fails after its memory assembly still settles memoryRecall with the record', async () => {
-    const failed = await ask({ capture: 'metadata' }, 'stream', Object.assign(new Error('bad request'), { httpStatus: 400 }));
+    const failed = await ask({ ...EARLIER_DEFAULTS, capture: 'metadata' }, 'stream', Object.assign(new Error('bad request'), { httpStatus: 400 }));
     expect(failed.block).toContain(PREAMBLE_HEADING);
     expect(failed.text).toBe('');
     expect(failed.memoryRecall?.version).toBe('memory-recall-capture/1');
@@ -399,7 +413,8 @@ describe("agent({ runtime: 'gmi' }) memory budget across a fallback hop", () => 
     const a = agent({
       runtime: 'gmi', name: 'Harbor', provider: 'openai', model: 'stub-model', apiKey: k,
       fallbackProviders: [{ provider: 'anthropic', model: 'claude-x' }],
-      cognition: { memory: { embedding: { provider: 'openai' } }, mechanisms: false },
+      // The 1,600-token selection: the 3,000-token model's share of 600 is under the block it fills.
+      cognition: { memory: { embedding: { provider: 'openai' }, recall: EARLIER_DEFAULTS }, mechanisms: false },
     } as unknown as AgentOptions);
     try {
       const session = a.session('s');

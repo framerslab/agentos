@@ -309,7 +309,7 @@ describe.each(ENGINES)("agent({ runtime: 'gmi' }) memory.recall over a durable s
     }
   });
 
-  it('the defaults as a set: no memory.recall sends, byte for byte, the block of dense, no rerank, 1,600 tokens and a metadata capture', async () => {
+  it('the defaults as a set: no memory.recall sends, byte for byte, the block of dense, no rerank, 6,400 tokens and a metadata capture', async () => {
     // A faked clock, so both blocks print the same ages: it stands still but for the millisecond each new memory
     // moves it on (the uuid mock above).
     vi.useFakeTimers({ toFake: ['Date'], shouldAdvanceTime: false });
@@ -318,7 +318,7 @@ describe.each(ENGINES)("agent({ runtime: 'gmi' }) memory.recall over a durable s
     const b = await open();
     try {
       const unset = await askAfterRestart(a, undefined, 'What is the bike shed code?');
-      const explicit = await askAfterRestart(b, { budget: { totalTokens: 1600 }, retrieval: 'dense', rerank: 'none', capture: 'metadata' }, 'What is the bike shed code?');
+      const explicit = await askAfterRestart(b, { budget: { totalTokens: 6400 }, retrieval: 'dense', rerank: 'none', capture: 'metadata' }, 'What is the bike shed code?');
       expect(unset.block).toContain(GOLD);
       expect(explicit.block).toBe(unset.block);
       expect(explicit.embedCalls).toBe(unset.embedCalls);
@@ -328,8 +328,38 @@ describe.each(ENGINES)("agent({ runtime: 'gmi' }) memory.recall over a durable s
           lexicalBackend: 'none',
           reranker: { provider: 'none', reason: 'none_configured' },
           memoryQuestionReserve: { fired: false, added: 0 },
+          budget: { requested: 6400 },
+        });
+        expect(record!.legs.map((l) => l.leg)).toEqual(['dense']);
+      }
+    } finally {
+      await a.close();
+      await b.close();
+    }
+  });
+
+  it('the earlier defaults as a setting: dense, no rerank and 1,600 tokens send, byte for byte, the block a budget of 1,600 alone sends', async () => {
+    // The selection a memory with no recall setting ran before the default budget was 6,400.
+    vi.useFakeTimers({ toFake: ['Date'], shouldAdvanceTime: false });
+    vi.setSystemTime(FILING_STARTS_AT);
+    const a = await open();
+    const b = await open();
+    try {
+      const budgetAlone = await askAfterRestart(a, { budget: { totalTokens: 1600 } }, 'What is the bike shed code?');
+      const explicit = await askAfterRestart(b, { budget: { totalTokens: 1600 }, retrieval: 'dense', rerank: 'none', capture: 'metadata' }, 'What is the bike shed code?');
+      expect(explicit.block).toContain(GOLD);
+      expect(explicit.block).toBe(budgetAlone.block);
+      expect(explicit.embedCalls).toBe(budgetAlone.embedCalls);
+      expect(tokensOf(explicit.block)).toBeLessThanOrEqual(1600);
+      for (const record of [budgetAlone.memoryRecall, explicit.memoryRecall]) {
+        expect(record).toMatchObject({
+          retrieval: 'dense',
+          lexicalBackend: 'none',
+          reranker: { provider: 'none', reason: 'none_configured' },
+          memoryQuestionReserve: { fired: false, added: 0 },
           budget: { requested: 1600 },
         });
+        expect(record!.tokensUsed).toBeLessThanOrEqual(1600);
         expect(record!.legs.map((l) => l.leg)).toEqual(['dense']);
       }
     } finally {

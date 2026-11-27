@@ -7,8 +7,12 @@
 import type { ManagerRecallConfig } from '../../core/config.js';
 import { recallLog } from './log.js';
 
-/** The memory block's budget, in tokens, when no `recall.budget.totalTokens` is set: what the GMI's memory bridge asked for before the setting existed. */
-export const DEFAULT_RECALL_BUDGET_TOKENS = 1600;
+/**
+ * The memory block's budget, in tokens, when no `recall.budget.totalTokens` is set. A model whose retrieved-context
+ * share ({@link PROMPT_CONTEXT_SHARE} of its context) holds less is sent a smaller block ({@link effectiveRecallBudget}):
+ * the whole 6,400 reaches a model of 32,000 tokens of context or more, on a turn with no other retrieved context.
+ */
+export const DEFAULT_RECALL_BUDGET_TOKENS = 6400;
 
 const CAPTURE_MODES: readonly unknown[] = ['off', 'metadata', 'metadata+stream', 'metadata+text'];
 const RETRIEVAL_MODES: readonly unknown[] = ['dense', 'hybrid'];

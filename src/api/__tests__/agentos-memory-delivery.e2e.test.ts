@@ -69,7 +69,9 @@ async function memoryManager(): Promise<CognitiveMemoryManager> {
       generateEmbeddings: async ({ texts }: { texts: string | string[] }) => ({ embeddings: (Array.isArray(texts) ? texts : [texts]).map(wordHash) }),
     },
     graph: { disabled: true },
-    recall: { capture: 'metadata+stream' },
+    // A block of 1,600 tokens, written out with the retrieval and rerank it runs beside: the cases below size their
+    // models and long-term-memory text against it.
+    recall: { retrieval: 'dense', rerank: 'none', budget: { totalTokens: 1600 }, capture: 'metadata+stream' },
   } as unknown as CognitiveMemoryConfig);
   managers.push(manager);
   return manager;

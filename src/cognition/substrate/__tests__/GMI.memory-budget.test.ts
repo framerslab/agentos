@@ -49,13 +49,17 @@ const FERRY = Array.from(
   (_, i) => `Island ferry note ${i}: the island ferry leaves pier ${i + 3} at ${6 + i}:15, and the ticket desk beside that pier opens forty minutes before each crossing.`,
 );
 
-/** A memory holding the ferry notes. */
+/** A memory holding the ferry notes, its block set to 1,600 tokens with the retrieval and rerank it runs beside. */
 async function ferryMemory(): Promise<AgentCognitiveMemory> {
   const persona = {
     id: 'memo', name: 'Memo', description: 'd', version: '1.0.0', baseSystemPrompt: 'x',
     personalityTraits: { conscientiousness: 0.9, openness: 0.2, emotionality: 0.2 },
   } as never;
-  const mem = await createAgentCognitiveMemory({ persona, memory: {}, embeddingManager: makeEmbedder() as never });
+  const mem = await createAgentCognitiveMemory({
+    persona,
+    memory: { recall: { retrieval: 'dense', rerank: 'none', budget: { totalTokens: 1600 } } },
+    embeddingManager: makeEmbedder() as never,
+  });
   for (const note of FERRY) await mem.manager.encode(note, neutral, 'neutral', { type: 'episodic' });
   return mem;
 }
