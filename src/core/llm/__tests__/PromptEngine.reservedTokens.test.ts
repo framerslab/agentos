@@ -6,7 +6,7 @@
  */
 import { beforeEach, describe, expect, it } from 'vitest';
 
-import { PromptEngine } from '../PromptEngine';
+import { APPLICATION_NOTE_FRAME, PromptEngine } from '../PromptEngine';
 import type { ModelTargetInfo, PromptEngineResult, PromptExecutionContext } from '../IPromptEngine';
 
 /** A 4,000-token model whose id PromptEngine counts at four characters a token: the history share is 1,400 tokens, the retrieved-context share 800. */
@@ -85,9 +85,10 @@ describe('PromptEngine reservedTokens', () => {
 
   it('the earlier history is kept to what the budget less the reservation leaves, so the prompt and the reservation fit the context together', async () => {
     const components = { ...base, conversationHistory: EARLIER };
-    // With nothing reserved the history is held to its share alone: the newest 14 of the 20 messages.
+    // With nothing reserved the history is held to its share alone: at 105 tokens a message (100 of text and 5 for the
+    // message), the newest 13 of the 20 messages fit the 1,400-token share.
     const plain = await build(components);
-    expect(earlierKept(plain)).toBe(14);
+    expect(earlierKept(plain)).toBe(13);
     expect(promptTokens(plain)).toBeGreaterThan(2_000);
 
     // 2,000 tokens travel beside the prompt: the question and the system text leave under 1,000 of the other 2,000.
@@ -99,6 +100,23 @@ describe('PromptEngine reservedTokens', () => {
     // The newest earlier message is among those kept: the oldest go first.
     expect(JSON.stringify(reserved.prompt)).toContain('Earlier message 19');
     expect(codes(reserved)).not.toContain('TOKEN_BUDGET_EXCEEDED_POST_OPT');
+  });
+
+  it("the earlier history is held to its target as the budget counts it, each message's overhead included", async () => {
+    // Twenty earlier messages of 20 characters: 5 tokens of text and 5 for the message each, 200 tokens in all. The
+    // reservation leaves the earlier history 100 tokens beside the question and the system text.
+    const short = Array.from({ length: 20 }, (_, i) => ({ role: i % 2 === 0 ? 'user' : 'assistant', content: `Short note ${String(i).padStart(2, '0')}: abcde` }));
+    expect(short.every((message) => message.content.length === 20)).toBe(true);
+    const fixed = await engine.estimateFixedPromptTokens(base as never, MODEL, executionContext);
+    // estimateFixedPromptTokens counts the note's frame line, which a prompt with no retrieved text does not send.
+    const frame = await engine.estimateTokenCount(`${APPLICATION_NOTE_FRAME}\n`, MODEL.modelId);
+    const reservedTokens = 4_000 - (fixed - frame) - 100;
+    const built = await build({ ...base, conversationHistory: short, reservedTokens });
+    const kept = short.filter((message) => JSON.stringify(built.prompt).includes(message.content)).length;
+    expect(kept, 'the earlier messages kept, at 10 tokens each against a target of 100').toBe(10);
+    expect(JSON.stringify(built.prompt)).toContain('Short note 19');
+    expect(built.modificationDetails?.historyOmitted).toEqual({ messages: 10, tokens: 100 });
+    expect(codes(built)).not.toContain('TOKEN_BUDGET_EXCEEDED_POST_OPT');
   });
 
   it('the other retrieved context is reduced for the reservation too, to what the fixed parts and the reservation leave of the context', async () => {
