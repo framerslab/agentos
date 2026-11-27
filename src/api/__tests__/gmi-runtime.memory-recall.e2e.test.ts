@@ -403,18 +403,41 @@ describe.each(ENGINES)("agent({ runtime: 'gmi' }) memory.recall over a durable s
     }
   });
 
-  it("with no recall setting the turn's record reads the frozen defaults", async () => {
-    const db = await open();
+  it('with no recall setting the turn reads the frozen defaults, and its block holds more than 1,600 tokens: memories a 1,600-token block leaves out', async () => {
+    // A model of 32,000 tokens of context, whose retrieved-context share holds the whole default, and a recall whose
+    // candidates fill more than 6,400 tokens.
+    const WINDOW = 32_000;
+    const a = await open();
+    const b = await open();
     try {
-      const out = await askAfterRestart(db, undefined, 'What is the bike shed code?');
-      expect(out.block).toContain(GOLD);
-      const record = out.memoryRecall!;
+      const unset = await askAfterRestart(a, undefined, 'What is the bike shed code?', { statements: LONG_STATEMENTS, window: WINDOW });
+      const earlier = await askAfterRestart(b, { budget: { totalTokens: 1600 } }, 'What is the bike shed code?', { statements: LONG_STATEMENTS, window: WINDOW });
+      const record = unset.memoryRecall!;
       expect(record).toBeDefined();
       expect(record.retrieval).toBe('dense');
       expect(record.reranker.provider).toBe('none');
-      expect(record.budget.requested).toBe(6400);
+      expect(record.budget).toMatchObject({ requested: 6400, effective: 6400, hop: 0 });
+      expect(record.budget.clampReason).toBeUndefined();
+
+      // The default sends more than the earlier default's 1,600 tokens, within its own 6,400.
+      expect(record.tokensUsed).toBeGreaterThan(1600);
+      expect(record.tokensUsed).toBeLessThanOrEqual(6400);
+      expect(tokensOf(unset.block)).toBeGreaterThan(1600);
+      expect(tokensOf(unset.block)).toBeLessThanOrEqual(6400);
+      expect(earlier.memoryRecall!.budget).toMatchObject({ requested: 1600, effective: 1600 });
+      expect(earlier.memoryRecall!.tokensUsed).toBeLessThanOrEqual(1600);
+      expect(tokensOf(earlier.block)).toBeLessThanOrEqual(1600);
+      expect(unset.block.length).toBeGreaterThan(earlier.block.length);
+
+      // Both blocks show the memory that answers; the default's shows memories the 1,600-token block left out.
+      expect(unset.block).toContain(GOLD);
+      expect(earlier.block).toContain(GOLD);
+      const shownIn = (block: string) => LONG_NOTES.filter((note) => block.includes(note));
+      expect(shownIn(unset.block).length).toBeGreaterThan(shownIn(earlier.block).length);
+      expect(shownIn(unset.block).some((note) => !earlier.block.includes(note))).toBe(true);
     } finally {
-      await db.close();
+      await a.close();
+      await b.close();
     }
   });
 
