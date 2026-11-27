@@ -574,6 +574,38 @@ describe('the forgotten-user ledger', () => {
     expect(await ledger.markForgotten(ALICE)).toMatchObject({ written: true });
     expect(await tombstonesOf(pair.copy)).toHaveLength(1);
   });
+
+  it("names the store as the side that refused when the store's write lock is held after the copy was written", async () => {
+    const dir = folder();
+    const pair = await openPair(dir);
+    const ledger = await ForgottenLedger.open(pair);
+    // Another connection to the store's file holds its write lock past the store's busy timeout; the copy is free.
+    await pair.primary.get('PRAGMA busy_timeout = 50');
+    const holder = await sqliteAt(path.join(dir, 'memory.sqlite'));
+    await holder.run('BEGIN IMMEDIATE');
+    logged.length = 0;
+
+    const refused = await ledger.markForgotten(ALICE).catch((error: unknown) => error);
+    await holder.run('ROLLBACK');
+
+    expect(refused).toBeInstanceOf(ForgottenLedgerError);
+    expect(refused).toMatchObject({ name: 'ForgottenLedgerError', code: 'LEDGER_UNAVAILABLE' });
+    const message = (refused as Error).message;
+    // The message names the side that refused, says that side wrote nothing, and claims nothing of the other side.
+    expect(message).toMatch(/\bstore\b/);
+    expect(message).toMatch(/the store's transaction wrote nothing/i);
+    expect(message).not.toMatch(/no row was changed/i);
+    expect(message).not.toMatch(/\bcopy\b/);
+    expect(refusals()).toEqual([expect.objectContaining({ type: 'ForgottenLedgerError', code: 'LEDGER_UNAVAILABLE' })]);
+    // The copy's transaction committed before the store's was refused: the copy holds the tombstone, and it is read.
+    expect(await tombstonesOf(pair.primary)).toEqual([]);
+    expect(await tombstonesOf(pair.copy)).toHaveLength(1);
+    expect(await ledger.isForgotten(ALICE)).toBe(true);
+    // Once the lock is let go, the same call completes the write, and both sides hold the tombstone.
+    await ledger.markForgotten(ALICE);
+    expect(await tombstonesOf(pair.primary)).toHaveLength(1);
+    expect(await tombstonesOf(pair.copy)).toHaveLength(1);
+  });
 });
 
 describe("the ledger's identity", () => {
