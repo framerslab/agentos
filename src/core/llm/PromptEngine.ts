@@ -29,7 +29,6 @@ import {
   ContextualElementType,
   PromptEngineError,
   IPromptEngineUtilityAI,
-  TokenEstimator,
 } from './IPromptEngine';
 import { resolveCacheCapabilities } from './providers/model-cache-capabilities';
 import {
@@ -207,6 +206,32 @@ function hostNoteAsSent(note: string, components: Readonly<PromptComponents>): s
   const between = Boolean(components.memoryContextText) && typeof components.retrievedContext === 'string' && Boolean(other);
   if (!beside) return applicationNoteOf(note);
   return between ? `${applicationNoteOf(note)}\n\n---\n\n\n\n---\n\n` : `${applicationNoteOf(note)}\n\n---\n\n`;
+}
+
+/**
+ * The frame line of the note a prompt with no host note is sent with, for the token count: the line that opens the
+ * memory block or other retrieved text in the newest user message, with the newline after it. No count of the budget
+ * step's parts holds it (a host note is counted with its own frame, {@link hostNoteAsSent}), so the budget step takes
+ * it off the budget the prompt is held to, as `estimateFixedPromptTokens` counts it among the fixed parts.
+ *
+ * @param components - The prompt's components: before the budget step, or as it has reduced them.
+ * @returns The text to count; '' when the prompt has a host note, or neither a memory block nor other retrieved text.
+ */
+function noteFrameAsSent(components: Readonly<PromptComponents>): string {
+  if (hostNoteOf(components)) return '';
+  const sendsNote = Boolean(components.memoryContextText) || Boolean(retrievedContextAsText(components.retrievedContext));
+  return sendsNote ? applicationNoteOf('') : '';
+}
+
+/**
+ * The tokens a prompt's caller reserved for what its request carries beside the prompt (`reservedTokens`).
+ *
+ * @param components - The prompt's components.
+ * @returns The reservation; 0 when it is unset, not a finite number, or not above 0.
+ */
+function reservedTokensOf(components: Readonly<PromptComponents>): number {
+  const reserved: unknown = components.reservedTokens;
+  return typeof reserved === 'number' && Number.isFinite(reserved) && reserved > 0 ? reserved : 0;
 }
 
 /**
@@ -616,7 +641,10 @@ export class PromptEngine implements IPromptEngine {
    * tool round the turn's first message belongs to), the tools, and the application note as it is sent beside a memory
    * block: its frame line, the host's note when the turn has one, and the separators after it. With no turn message
    * and no `userInput`, the newest history message counts, with its tool round, since the budget step keeps it so that
-   * there is a message to send.
+   * there is a message to send. Two more parts are counted where the components carry them: `reservedTokens`, what
+   * the request carries beside the prompt, and, beside a list of retrieved context (an empty one too), the `Source:`
+   * and `Content:` labels the template puts on the memory entry, with the blank line after it when the list has
+   * entries.
    *
    * The memory block, the other retrieved context and the history before the turn are not counted: the block is what
    * the caller sizes with this figure, and the other two are what the budget step reduces. A memory block of at most
@@ -656,7 +684,14 @@ export class PromptEngine implements IPromptEngine {
     const noteBesideBlock = hostNote
       ? hostNoteAsSent(hostNote, { ...components, memoryContextText: components.memoryContextText || ' ' })
       : applicationNoteOf('');
-    return partsTokens + await this.estimateTokenCount(noteBesideBlock, modelTargetInfo.modelId);
+    // Beside a list, the memory block is sent as the list's first entry, under labels the block's own count leaves out.
+    const listLabels = Array.isArray(components.retrievedContext) ? memoryTextAsSent('', components.retrievedContext) : '';
+    return (
+      partsTokens +
+      (await this.estimateTokenCount(noteBesideBlock, modelTargetInfo.modelId)) +
+      (await this.estimateTokenCount(listLabels, modelTargetInfo.modelId)) +
+      reservedTokensOf(components)
+    );
   }
 
   public async estimateTokenCount(content: string, modelId?: string): Promise<number> {
@@ -1078,6 +1113,21 @@ export class PromptEngine implements IPromptEngine {
     return undefined;
   }
 
+  /**
+   * What a prompt itself may hold on a model: the model's budget (`optimalContextTokens`, else `maxContextTokens`)
+   * less what the request carries beside the prompt (`reservedTokens`) and less the frame line the prompt's note opens
+   * with where no part's count holds it ({@link noteFrameAsSent}).
+   *
+   * @param components - The prompt's components: before the budget step, or as it has reduced them.
+   * @param modelInfo - The model the prompt is built for.
+   * @returns The tokens the prompt may hold; never below 0.
+   */
+  private async promptBudgetOf(components: Readonly<PromptComponents>, modelInfo: Readonly<ModelTargetInfo>): Promise<number> {
+    const budget = modelInfo.optimalContextTokens || modelInfo.maxContextTokens;
+    const frameTokens = await this.estimateTokenCount(noteFrameAsSent(components), modelInfo.modelId);
+    return Math.max(0, budget - reservedTokensOf(components) - frameTokens);
+  }
+
   private async applyTokenBudget(
     components: PromptComponents,
     modelInfo: Readonly<ModelTargetInfo>,
@@ -1093,11 +1143,18 @@ export class PromptEngine implements IPromptEngine {
      *  - system: 20%, user: 15%, history: 35%, rag: 20%, tools: 10%
      * Summarization: Uses UtilityAI if available & trigger ratio exceeded; else truncation fallback.
      * Memory: `memoryContextText` counts toward the prompt and the rag share and is never reduced; the rag share's
-     *  reduction falls on `retrievedContext` alone, to what the share leaves beside the memory block (less the
-     *  prompt's overrun), and a target of 0 removes it.
+     *  reduction falls on `retrievedContext` alone, to what the share leaves beside the memory block less the prompt's
+     *  overrun, or, where the prompt fits without it, to the smaller of what the share leaves beside the block and what
+     *  it holds less the overrun; a target of 0 removes it.
      * Host note: `applicationNote` counts toward the prompt with the user's message, outside the rag share, and is never
      *  reduced; a prompt over the budget after the reductions goes out with it whole, with the
      *  `TOKEN_BUDGET_EXCEEDED_POST_OPT` warning.
+     * Reservation: the prompt is held to the budget less `reservedTokens` (what the request carries beside the prompt:
+     *  tool schemas, a response schema's payload, a message the caller adds after the build) and less the frame line
+     *  a prompt with no host note opens its memory block or retrieved text with, which no part's count holds. The
+     *  earlier history and `retrievedContext` are reduced to fit what is left; the shares above stay shares of the
+     *  model's whole budget. The over-budget warning compares the prompt as reduced with its budget as sent: a prompt
+     *  whose retrieved text was removed, with no memory block and no host note, sends no note and no frame line.
      * Failure Handling: On summarization errors pushes warning issue & falls back to truncation.
      * Returns cloned optimized components plus modification descriptors for telemetry.
      */
@@ -1108,6 +1165,10 @@ export class PromptEngine implements IPromptEngine {
     };
 
     const budget = modelInfo.optimalContextTokens || modelInfo.maxContextTokens;
+    // What the prompt itself may hold: the budget less what the request carries beside it, and less the note's frame
+    // line where no part's count holds it.
+    const reservedTokens = reservedTokensOf(optimized);
+    const promptBudget = await this.promptBudgetOf(optimized, modelInfo);
     const sendsThinking = this.thinkingSentFor(optimized.conversationHistory, modelInfo);
     let currentTokens = await this.calculateTotalTokens(optimized, modelInfo.modelId, sendsThinking);
     modifications.details!.originalEstimatedTokenCount = currentTokens;
@@ -1122,7 +1183,7 @@ export class PromptEngine implements IPromptEngine {
 
     if (optimized.conversationHistory && optimized.conversationHistory.length > 0) {
       const historyTokens = await this.calculateTokensForMessages(optimized.conversationHistory, modelInfo.modelId, sendsThinking);
-      if (historyTokens > budgets.history || currentTokens > budget) {
+      if (historyTokens > budgets.history || currentTokens > promptBudget) {
         // The turn being answered stays whole: summarizing or truncating it
         // would drop the request itself (a structured user message has no
         // userInput copy) or split a tool call from its result. A tool round
@@ -1138,7 +1199,7 @@ export class PromptEngine implements IPromptEngine {
         // The earlier history keeps its share of the history budget, and no
         // more than fits beside everything else in the prompt.
         const earlierBudget = Math.max(0, budgets.history - turnTokens);
-        const earlierTarget = Math.max(0, Math.min(earlierBudget, budget - (currentTokens - earlierTokens)));
+        const earlierTarget = Math.max(0, Math.min(earlierBudget, promptBudget - (currentTokens - earlierTokens)));
         // When the turn is kept, or the request travels as userInput, there
         // is always a message to send, so the earlier history may go
         // entirely.
@@ -1166,12 +1227,12 @@ export class PromptEngine implements IPromptEngine {
               modifications.wasModified = true;
             } catch (e) {
               issues?.push({type: 'warning', code: 'HISTORY_SUMMARIZATION_FAILED', message: `History summarization failed: ${e instanceof Error ? e.message : String(e)}`});
-              reducedEarlier = this.truncateMessages([...earlier], earlierTarget, (content) => this.estimateTokenCount(content, modelInfo.modelId), minEarlierKept, sendsThinking);
+              reducedEarlier = await this.truncateMessages([...earlier], earlierTarget, modelInfo.modelId, minEarlierKept, sendsThinking);
               modifications.details!.truncatedComponents!.push('conversationHistory');
               modifications.wasModified = true;
             }
           } else {
-            reducedEarlier = this.truncateMessages([...earlier], earlierTarget, (content) => this.estimateTokenCount(content, modelInfo.modelId), minEarlierKept, sendsThinking);
+            reducedEarlier = await this.truncateMessages([...earlier], earlierTarget, modelInfo.modelId, minEarlierKept, sendsThinking);
             if (reducedEarlier.length < earlier.length) {
               modifications.details!.truncatedComponents!.push('conversationHistory');
               modifications.wasModified = true;
@@ -1204,10 +1265,19 @@ export class PromptEngine implements IPromptEngine {
       const contextStr = typeof optimized.retrievedContext === 'string' ? optimized.retrievedContext : optimized.retrievedContext.map(r => r.content).join('\n');
       let ragTokens = await this.estimateTokenCount(contextStr, modelInfo.modelId);
       otherBefore = ragTokens;
-      if (ragTokens + memoryTokens > budgets.rag || currentTokens > budget) {
+      if (ragTokens + memoryTokens > budgets.rag || currentTokens > promptBudget) {
         // What the other context may keep: the share less the memory block, less the overrun when the prompt is over
-        // its budget.
-        const target = Math.max(0, Math.floor(budgets.rag - memoryTokens - Math.max(0, currentTokens - budget)));
+        // its budget. Where the prompt fits its budget without the other context, the context keeps no more than it
+        // holds less the overrun, so that context under its share still gives the overrun up and the prompt fits.
+        // Without the other context, a prompt with no memory block and no host note opens no note, so that budget
+        // takes no frame line off. Where the prompt is over without the other context too, giving it up does not make
+        // the prompt fit, and the share less the overrun alone applies.
+        const overrun = Math.max(0, currentTokens - promptBudget);
+        const fitsWithout =
+          overrun > 0 && currentTokens - ragTokens <= (await this.promptBudgetOf({ ...optimized, retrievedContext: undefined }, modelInfo));
+        const target = Math.max(0, Math.floor(
+          fitsWithout ? Math.min(budgets.rag - memoryTokens, ragTokens - overrun) : budgets.rag - memoryTokens - overrun,
+        ));
         // A target the other context already fits leaves it as it is: nothing is cut, summarised or reported cut.
         if (target < ragTokens) {
           const retrievedBefore = optimized.retrievedContext;
@@ -1259,8 +1329,12 @@ export class PromptEngine implements IPromptEngine {
       otherAfter = ragTokens;
     }
 
-    if (currentTokens > budget && issues) {
-      issues.push({ type: 'warning', code: 'TOKEN_BUDGET_EXCEEDED_POST_OPT', message: `Prompt still exceeds budget (${currentTokens}/${budget}) after initial optimizations. Quality may be affected.`});
+    // The budget as the reduced prompt is sent: one whose retrieved text was removed, with no memory block and no host
+    // note, sends no note, so no frame line comes off it.
+    const sentBudget = await this.promptBudgetOf(optimized, modelInfo);
+    if (currentTokens > sentBudget && issues) {
+      const reservedNote = reservedTokens > 0 ? `; ${reservedTokens} of the model's ${budget} tokens are reserved for what the request carries beside the prompt` : '';
+      issues.push({ type: 'warning', code: 'TOKEN_BUDGET_EXCEEDED_POST_OPT', message: `Prompt still exceeds budget (${currentTokens}/${sentBudget}${reservedNote}) after initial optimizations. Quality may be affected.`});
     }
 
     return { optimizedComponents: optimized, modifications, contextTokens: { memory: memoryTokens, otherBefore, otherAfter } };
@@ -1359,43 +1433,33 @@ export class PromptEngine implements IPromptEngine {
 
   /**
    * Drops the oldest messages until the rest fit `targetTokenCount`, keeping
-   * at least `minKept`. Chat APIs reject a tool call without its result and a
+   * at least `minKept`. Each message is counted as the budget step counts it
+   * (`calculateTokensForMessages`: the model's rate, the thinking the target
+   * receives with it and the per-message overhead), so what is kept measures
+   * within the target. Chat APIs reject a tool call without its result and a
    * tool result without its call, so a tool round (an assistant message that
    * names tool calls, the tool messages that answer them and anything between)
    * is dropped whole or kept whole: when dropping it would leave fewer than
    * `minKept` messages, it stays, over the budget. A tool result left first
    * with no call before it in `messages` goes too.
    */
-  private truncateMessages(
+  private async truncateMessages(
     messages: Message[],
     targetTokenCount: number,
-    _estimateFn: TokenEstimator,
+    modelId: string,
     minKept = 1,
     sendsThinking: (msg: Message) => boolean = () => false,
-  ): Message[] {
-    // Rough estimate: four characters a token, over the content and any
-    // thinking the target receives with the message.
-    const roughTokens = (msg: Message | undefined): number => {
-      if (!msg) return 0;
-      const contentChars = typeof msg.content === 'string'
-        ? msg.content.length
-        : (Array.isArray(msg.content) ? JSON.stringify(msg.content).length : 50);
-      const thinkingChars = sendsThinking(msg)
-        ? (msg.thinkingBlocks ?? []).reduce(
-            (chars, block) => chars + (block.type === 'thinking' ? block.thinking.length : block.data.length),
-            0,
-          )
-        : 0;
-      return (contentChars + thinkingChars) / 4;
-    };
-    let currentTokens = messages.reduce((sum, msg) => sum + roughTokens(msg), 0);
+  ): Promise<Message[]> {
+    const tokens: number[] = [];
+    for (const msg of messages) tokens.push(await this.calculateTokensForMessages([msg], modelId, sendsThinking));
+    let currentTokens = tokens.reduce((sum, count) => sum + count, 0);
     const rounds = toolRoundBounds(messages);
     // `first` is always the first message of a tool round or a message outside every round.
     let first = 0;
     while (currentTokens > targetTokenCount && first < messages.length) {
       const last = rounds.end[first];
       if (messages.length - (last + 1) < minKept) break;
-      for (let index = first; index <= last; index += 1) currentTokens -= roughTokens(messages[index]);
+      for (let index = first; index <= last; index += 1) currentTokens -= tokens[index];
       first = last + 1;
     }
     while (messages.length - first > minKept && messages[first]?.role === MessageRole.TOOL) {

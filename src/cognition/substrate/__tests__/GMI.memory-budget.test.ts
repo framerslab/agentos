@@ -8,12 +8,15 @@
  * reached the model.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { z } from 'zod';
 import { createAgentCognitiveMemory, type AgentCognitiveMemory } from '../../../api/runtime/agentCognitiveMemory';
 import type { AIModelProviderManager } from '../../../core/llm/providers/AIModelProviderManager';
 import type { IProvider } from '../../../core/llm/providers/IProvider';
 import type { MemoryRecallCapture } from '../../memory/retrieval/recall/capture';
 import { PromptEngine } from '../../../core/llm/PromptEngine';
 import type { IPromptEngine, ModelTargetInfo, PromptComponents, PromptExecutionContext } from '../../../core/llm/IPromptEngine';
+import type { IToolOrchestrator, ToolDefinitionForLLM } from '../../../core/tools/IToolOrchestrator';
+import { toolFormatFor, type CompletionGateway, type CompletionOutcome, type CompletionResolution } from '../../../api/runtime/completionGateway';
 import { createScriptedGmi, promptEngineConfig, runTurn, scriptedProvider, textReply, textTurn } from './helpers/scriptedGmi';
 
 const DIM = 64;
@@ -76,6 +79,40 @@ function smallWindowManager(provider: IProvider, window: number): AIModelProvide
 
 /** Tokens of a text by the assembler's estimate (about four characters a token). */
 const tokensOf = (text: string) => Math.ceil(text.length / 4);
+
+/** A tool whose schema is about 7,400 tokens of JSON. */
+const TIMETABLE_TOOL: ToolDefinitionForLLM = {
+  name: 'timetable',
+  description: Array.from({ length: 315 }, (_, i) => `Timetable row ${String(i).padStart(3, '0')}: looks up when the island ferry leaves one pier on one crossing of the day.`).join(' '),
+  inputSchema: { type: 'object', properties: { pier: { type: 'string' } } },
+};
+
+/**
+ * A host's own completion gateway: one hop on a model of `window` tokens that answers every request with `answer`
+ * and records the options each request was sent with. `toolsSentWithSchema`, when given, is the gateway's own answer
+ * to whether a request with a response schema keeps its tools; a gateway written before the member has none.
+ */
+function hostGateway(window: number, answer: string, toolsSentWithSchema?: () => boolean) {
+  const sent: Array<Record<string, unknown>> = [];
+  const resolution: CompletionResolution = {
+    providerId: 'openai', modelId: 'host-model', hop: 0, maxContextTokens: window,
+    capabilities: ['chat', 'tool_use'], toolFormat: toolFormatFor('openai'), optionOverrides: {},
+    providerManager: {
+      getProvider: () => ({ providerId: 'openai', isInitialized: true }),
+      getModelInfo: async () => ({ modelId: 'host-model', providerId: 'openai', contextWindowSize: window, capabilities: ['chat', 'tool_use'] }),
+    } as never,
+    chain: [{ provider: 'openai', model: 'host-model' }],
+  };
+  const gateway = {
+    resolve: async (_route: unknown, after?: CompletionResolution) => (after ? null : resolution),
+    stream: (_resolution: CompletionResolution, _messages: unknown, options: Record<string, unknown>) => {
+      sent.push(options);
+      return Object.assign((async function* () { yield* textReply(answer); })(), { outcome: Promise.resolve<CompletionOutcome>({ kind: 'delivered' }) });
+    },
+    ...(toolsSentWithSchema ? { toolsSentWithSchema } : {}),
+  } as unknown as CompletionGateway;
+  return { gateway, sent };
+}
 
 let mem: AgentCognitiveMemory | undefined;
 afterEach(async () => {
@@ -286,5 +323,114 @@ describe('GMI memory block on a small model', () => {
     expect(capture.budget.fixedPromptTokens).toBeLessThan(200);
     expect(capture.delivery).toEqual({ memoryBlockTokens: expect.any(Number) });
     expect(JSON.stringify(received[0])).toContain('How To Use Your Memories');
+  });
+});
+
+describe('GMI memory block on a response-schema turn of a persona with tools', () => {
+  it("a turn's passthrough parameters ride the request whole: tools a host passes there are counted and reserved, on a request the gateway sends without the turn's own tools", async () => {
+    mem = await ferryMemory();
+    // The gateway sends a response-schema request without the persona's tools, so they are not counted. The host
+    // passes the same tool through customModelParams, which a provider writes into its request as given.
+    const { gateway, sent } = hostGateway(8_000, '{"pier":"Pier 3"}', () => false);
+    const toolOrchestrator = { orchestratorId: 'timetable-tools', listAvailableTools: vi.fn(async () => [TIMETABLE_TOOL]), processToolCall: vi.fn() } as unknown as IToolOrchestrator;
+    const { gmi, promptEngine } = await createScriptedGmi({ gateway, config: { cognitiveMemory: mem.manager.forSession(), toolOrchestrator } });
+    const construct = vi.spyOn(promptEngine, 'constructPrompt');
+    const customModelParams = { tools: [{ type: 'function', function: { name: TIMETABLE_TOOL.name, description: TIMETABLE_TOOL.description, parameters: TIMETABLE_TOOL.inputSchema } }] };
+    const { output } = await runTurn(gmi, textTurn('t1', 'Which pier does the island ferry leave from?', { options: { responseSchema: z.object({ pier: z.string() }), schemaName: 'answer', customModelParams } } as never));
+    expect(sent).toHaveLength(1);
+    expect(sent[0].customModelParams).toEqual(customModelParams);
+    const passthroughTokens = tokensOf(JSON.stringify(customModelParams));
+    expect(passthroughTokens).toBeGreaterThan(7_300);
+    const built = construct.mock.calls[0][0] as PromptComponents & { reservedTokens?: number };
+    expect(built.reservedTokens).toBe(passthroughTokens);
+    const capture = output.memoryRecall as MemoryRecallCapture;
+    expect(capture.budget).toMatchObject({ requested: 1600, clampReason: 'fixed_prompt', promptShareTokens: 1600, otherContextTokens: 0, hop: 0 });
+    expect(capture.budget.fixedPromptTokens).toBeGreaterThanOrEqual(passthroughTokens);
+    expect(capture.budget.effective).toBe(8_000 - capture.budget.fixedPromptTokens!);
+  });
+
+  it.each([
+    { says: 'has no toolsSentWithSchema', toolsSentWithSchema: undefined, counted: true },
+    { says: 'says a response-schema request keeps its tools', toolsSentWithSchema: () => true, counted: true },
+    { says: 'says a response-schema request is sent without tools', toolsSentWithSchema: () => false, counted: false },
+  ])("a gateway that $says: the tool schemas are counted among the request's fixed parts only where the request carries them", async ({ toolsSentWithSchema, counted }) => {
+    mem = await ferryMemory();
+    // 8,000 tokens of context and no other retrieved context: the share is 1,600, the whole configured budget. The
+    // tool's schema is about 7,400 tokens, so where it is counted, the fixed parts leave the block about 500.
+    const { gateway, sent } = hostGateway(8_000, '{"pier":"Pier 3"}', toolsSentWithSchema);
+    const toolOrchestrator = { orchestratorId: 'timetable-tools', listAvailableTools: vi.fn(async () => [TIMETABLE_TOOL]), processToolCall: vi.fn() } as unknown as IToolOrchestrator;
+    const { gmi, promptEngine } = await createScriptedGmi({ gateway, config: { cognitiveMemory: mem.manager.forSession(), toolOrchestrator } });
+    const construct = vi.spyOn(promptEngine, 'constructPrompt');
+    const schema = z.object({ pier: z.string() });
+    const { output } = await runTurn(gmi, textTurn('t1', 'Which pier does the island ferry leave from?', { options: { responseSchema: schema, schemaName: 'answer' } } as never));
+    expect(sent).toHaveLength(1);
+    // The GMI hands the gateway the turn's tools either way: the gateway decides what its request carries.
+    const toolTokens = tokensOf(JSON.stringify(sent[0].tools));
+    expect(toolTokens).toBeGreaterThan(7_300);
+    expect(toolTokens).toBeLessThan(7_600);
+    const capture = output.memoryRecall as MemoryRecallCapture;
+    expect(capture).toBeDefined();
+    const built = construct.mock.calls[0][0] as PromptComponents & { reservedTokens?: number };
+    if (counted) {
+      expect(capture.budget).toMatchObject({ requested: 1600, clampReason: 'fixed_prompt', promptShareTokens: 1600, otherContextTokens: 0, hop: 0 });
+      expect(capture.budget.fixedPromptTokens).toBeGreaterThanOrEqual(toolTokens);
+      expect(capture.budget.effective).toBe(8_000 - capture.budget.fixedPromptTokens!);
+      // The prompt is built with the same tokens taken off its budget.
+      expect(built.reservedTokens).toBe(toolTokens);
+    } else {
+      expect(capture.budget.fixedPromptTokens, "the fixed parts, with the tool schemas' " + toolTokens + ' tokens left out').toBeLessThan(200);
+      expect(capture.budget).toEqual({ requested: 1600, effective: 1600, promptShareTokens: 1600, otherContextTokens: 0, fixedPromptTokens: expect.any(Number), hop: 0 });
+      expect(built.reservedTokens).toBeUndefined();
+    }
+  });
+});
+
+describe('GMI memory block beside the response format and passthrough parameters a turn forwards', () => {
+  it('a forwarded responseFormat that carries a JSON schema, on a turn with no response schema, is counted and reserved as the request sends it', async () => {
+    mem = await ferryMemory();
+    // 8,000 tokens of context and no other retrieved context: the share is 1,600. The format's schema is about 7,400
+    // tokens, which the request carries beside the prompt, so the fixed parts leave the block about 500.
+    const { gateway, sent } = hostGateway(8_000, '{"pier":"Pier 3"}');
+    const { gmi, promptEngine } = await createScriptedGmi({ gateway, config: { cognitiveMemory: mem.manager.forSession() } });
+    const construct = vi.spyOn(promptEngine, 'constructPrompt');
+    const responseFormat = {
+      type: 'json_schema',
+      json_schema: { name: 'answer', schema: { type: 'object', description: TIMETABLE_TOOL.description, properties: { pier: { type: 'string' } } } },
+    };
+    const { output } = await runTurn(gmi, textTurn('t1', 'Which pier does the island ferry leave from?', { options: { responseFormat } } as never));
+    expect(sent).toHaveLength(1);
+    expect(sent[0].responseFormat).toEqual(responseFormat);
+    const formatTokens = tokensOf(JSON.stringify(responseFormat));
+    expect(formatTokens).toBeGreaterThan(7_300);
+    // Counted beside the tool schemas the turn offers, as the request carries both.
+    const toolTokens = Array.isArray(sent[0].tools) && sent[0].tools.length > 0 ? tokensOf(JSON.stringify(sent[0].tools)) : 0;
+    const built = construct.mock.calls[0][0] as PromptComponents & { reservedTokens?: number };
+    expect(built.reservedTokens).toBe(toolTokens + formatTokens);
+    const capture = output.memoryRecall as MemoryRecallCapture;
+    expect(capture.budget).toMatchObject({ requested: 1600, clampReason: 'fixed_prompt', promptShareTokens: 1600, otherContextTokens: 0, hop: 0 });
+    expect(capture.budget.fixedPromptTokens).toBeGreaterThanOrEqual(formatTokens);
+    expect(capture.budget.effective).toBe(8_000 - capture.budget.fixedPromptTokens!);
+  });
+
+  it("passthrough tools and response_format replace the turn's own tools and responseFormat on the wire, so they are counted in their place, once", async () => {
+    mem = await ferryMemory();
+    const { gateway, sent } = hostGateway(8_000, 'Pier 3.');
+    const toolOrchestrator = { orchestratorId: 'timetable-tools', listAvailableTools: vi.fn(async () => [TIMETABLE_TOOL]), processToolCall: vi.fn() } as unknown as IToolOrchestrator;
+    const { gmi, promptEngine } = await createScriptedGmi({ gateway, config: { cognitiveMemory: mem.manager.forSession(), toolOrchestrator } });
+    const construct = vi.spyOn(promptEngine, 'constructPrompt');
+    const responseFormat = { type: 'json_object' };
+    const customModelParams = {
+      tools: [{ type: 'function', function: { name: TIMETABLE_TOOL.name, description: TIMETABLE_TOOL.description, parameters: TIMETABLE_TOOL.inputSchema } }],
+      response_format: { type: 'json_object' },
+    };
+    await runTurn(gmi, textTurn('t1', 'Which pier does the island ferry leave from?', { options: { responseFormat, customModelParams } } as never));
+    expect(sent).toHaveLength(1);
+    // The GMI hands the gateway the turn's own tools and format; a provider writes the passthrough parameters last.
+    expect(tokensOf(JSON.stringify(sent[0].tools))).toBeGreaterThan(7_300);
+    expect(sent[0].responseFormat).toEqual(responseFormat);
+    expect(sent[0].customModelParams).toEqual(customModelParams);
+    const built = construct.mock.calls[0][0] as PromptComponents & { reservedTokens?: number };
+    // Counted once: the turn's tools and format are not sent beside the passthrough parameters that replace them.
+    expect(built.reservedTokens).toBe(tokensOf(JSON.stringify(customModelParams)));
   });
 });

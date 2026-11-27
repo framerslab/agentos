@@ -342,6 +342,7 @@ function gatewayFor(opts: AgentOptions): CompletionGateway {
     stream: base.stream,
     schemaInstruction: base.schemaInstruction,
     schemaPayload: base.schemaPayload,
+    toolsSentWithSchema: base.toolsSentWithSchema,
     resolve: (route, after, failure) =>
       base.resolve(
         {
@@ -1023,6 +1024,7 @@ export function gmi(opts: GmiOptions): GmiHandle {
         },
         schemaInstruction: gateway.schemaInstruction,
         schemaPayload: gateway.schemaPayload,
+        toolsSentWithSchema: gateway.toolsSentWithSchema,
       },
       maxToolLoopIterations: steps,
       defaultLlmProviderId: persona.defaultProviderId,
