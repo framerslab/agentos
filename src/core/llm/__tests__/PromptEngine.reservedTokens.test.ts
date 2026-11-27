@@ -121,6 +121,36 @@ describe('PromptEngine reservedTokens', () => {
     expect(codes(reserved)).not.toContain('TOKEN_BUDGET_EXCEEDED_POST_OPT');
   });
 
+  it('retrieved context under its share is still reduced by what the prompt is over, where giving that up makes the prompt fit', async () => {
+    // 400 tokens of retrieved context, half its share, beside 2,800 reserved tokens: the question, the system text and
+    // the context are about 230 tokens over the 1,200 left, less than the context holds.
+    const retrieved = RETRIEVED.slice(0, 1_600);
+    const components = { ...base, retrievedContext: retrieved };
+    const plain = await build(components);
+    expect(plain.wasTruncatedOrSummarized).toBe(false);
+
+    const fixed = await engine.estimateFixedPromptTokens(base as never, MODEL, executionContext);
+    const reserved = await build({ ...components, reservedTokens: 2_800 });
+    const counts = reserved.metadata.contextTokens as { otherBefore: number; otherAfter: number };
+    expect(counts.otherBefore).toBe(400);
+    // The context keeps what the fixed parts and the reservation leave of the model's context.
+    expect(counts.otherAfter).toBe(4_000 - 2_800 - fixed);
+    expect(counts.otherAfter).toBeGreaterThan(100);
+    expect(reserved.modificationDetails?.truncatedComponents).toContain('retrievedContext');
+    expect(promptTokens(reserved) + 2_800, `the prompt, ${promptTokens(reserved)} tokens, and the 2,800 reserved`).toBeLessThanOrEqual(4_000);
+    expect(codes(reserved)).not.toContain('TOKEN_BUDGET_EXCEEDED_POST_OPT');
+  });
+
+  it('a prompt over its budget by exactly what its retrieved context holds sends none of that context, and fits', async () => {
+    const retrieved = RETRIEVED.slice(0, 1_600);
+    const fixed = await engine.estimateFixedPromptTokens(base as never, MODEL, executionContext);
+    // The reservation that leaves the fixed parts the whole of what is left: the 400 tokens of context are the overrun.
+    const reserved = await build({ ...base, retrievedContext: retrieved, reservedTokens: 4_000 - fixed });
+    expect(reserved.modificationDetails?.removedComponents).toContain('retrievedContext');
+    expect((reserved.metadata.contextTokens as { otherAfter: number }).otherAfter).toBe(0);
+    expect(codes(reserved)).not.toContain('TOKEN_BUDGET_EXCEEDED_POST_OPT');
+  });
+
   it('a prompt whose fixed parts are over the budget less the reservation goes out with the over-budget warning, which names the reservation', async () => {
     expect(codes(await build(base))).not.toContain('TOKEN_BUDGET_EXCEEDED_POST_OPT');
     // The 1,000-token question beside 3,500 reserved tokens: nothing is left to reduce.
