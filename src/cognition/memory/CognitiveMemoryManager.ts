@@ -26,6 +26,11 @@ import type {
 } from './core/types.js';
 import { DEFAULT_TRUST_POLICY_BY_SOURCE } from './core/types.js';
 import type { CognitiveMemoryConfig, ManagerRecallConfig, PADState, HexacoTraits } from './core/config.js';
+import type {
+  ExtractionCallOptions,
+  ExtractionObservationOptions,
+  ExtractionRole,
+} from './extraction/policy.js';
 import {
   DEFAULT_ENCODING_CONFIG,
   DEFAULT_DECAY_CONFIG,
@@ -126,12 +131,19 @@ export interface MemoryDeletion {
 export interface ICognitiveMemoryManager {
   initialize(config: CognitiveMemoryConfig): Promise<void>;
 
-  /** Encode a new input into a memory trace. Called after each user message. */
+  /**
+   * Encode a new input into a memory trace. Called after each user message.
+   *
+   * The `ExtractionCallOptions` fields of `options` (`inputKind`, `turnId`, `role`,
+   * `subjectId`, `extraction`) are reserved for the conversational extraction pipeline
+   * and have no effect in this release: the manager does not read them, and
+   * `extraction: false` does not keep the input from a configured model callback.
+   */
   encode(
     input: string,
     mood: PADState,
     gmiMood: string,
-    options?: {
+    options?: ExtractionCallOptions & {
       type?: MemoryType;
       scope?: MemoryScope;
       scopeId?: string;
@@ -185,12 +197,19 @@ export interface ICognitiveMemoryManager {
    */
   reassembleForBudget?(context: AssembledMemoryContext, tokenBudget: number): Promise<AssembledMemoryContext>;
 
-  /** Feed a message to the observer (Batch 2). Returns notes if threshold reached. */
+  /**
+   * Feed a message to the observer (Batch 2). Returns notes if threshold reached.
+   *
+   * The `ExtractionObservationOptions` fields of `options` (`inputKind`, `turnId`,
+   * `subjectId`, `extraction`, `scope`, `scopeId`) are reserved for the conversational
+   * extraction pipeline and have no effect in this release: the manager does not read
+   * them, and `extraction: false` does not keep the message out of the observer's buffer.
+   */
   observe?(
-    role: 'user' | 'assistant' | 'system' | 'tool',
+    role: ExtractionRole,
     content: string,
     mood?: PADState,
-    options?: { contentSentiment?: number }
+    options?: ExtractionObservationOptions & { contentSentiment?: number }
   ): Promise<ObservationNote[] | null>;
 
   /** Check prospective memory triggers (Batch 2). */
@@ -1490,13 +1509,16 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
    * @param role - Message role (user, assistant, system, tool)
    * @param content - Message text content
    * @param mood - Optional PAD emotional state at observation time
+   * @param options - `contentSentiment` is passed to the traces reflection encodes. The
+   *   `ExtractionObservationOptions` fields are reserved for the conversational extraction
+   *   pipeline and have no effect in this release.
    * @returns Observation notes if threshold was reached, null otherwise
    */
   async observe(
-    role: 'user' | 'assistant' | 'system' | 'tool',
+    role: ExtractionRole,
     content: string,
     mood?: PADState,
-    options?: { contentSentiment?: number }
+    options?: ExtractionObservationOptions & { contentSentiment?: number }
   ): Promise<ObservationNote[] | null> {
     if (!this.observer) return null;
 

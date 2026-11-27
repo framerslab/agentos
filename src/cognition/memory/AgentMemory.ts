@@ -48,6 +48,11 @@ import type {
   TrustCapability,
 } from './core/types.js';
 import type { PADState, CognitiveMemoryConfig } from './core/config.js';
+import type {
+  ExtractionCallOptions,
+  ExtractionObservationOptions,
+  ExtractionRole,
+} from './extraction/policy.js';
 import type { ICognitiveMemoryManager } from './CognitiveMemoryManager.js';
 import { CognitiveMemoryManager } from './CognitiveMemoryManager.js';
 import type { ObservationNote } from './pipeline/observation/MemoryObserver.js';
@@ -208,10 +213,14 @@ export class AgentMemory {
    * @example
    * await memory.remember("User prefers dark mode");
    * await memory.remember("Deploy by Friday", { type: 'prospective', tags: ['deadline'] });
+   *
+   * The `ExtractionCallOptions` fields of `options` (`inputKind`, `turnId`, `role`,
+   * `subjectId`, `extraction`) are reserved for the conversational extraction pipeline
+   * and have no effect in this release: this method does not forward them.
    */
   async remember(
     content: string,
-    options?: {
+    options?: ExtractionCallOptions & {
       type?: MemoryType;
       scope?: MemoryScope;
       scopeId?: string;
@@ -307,11 +316,15 @@ export class AgentMemory {
    * @example
    * await memory.observe('user', "Can you help me debug this?");
    * await memory.observe('assistant', "Sure! The issue is in your useEffect...");
+   *
+   * The `ExtractionObservationOptions` fields of `options` (`inputKind`, `turnId`,
+   * `subjectId`, `extraction`, `scope`, `scopeId`) are reserved for the conversational
+   * extraction pipeline and have no effect in this release: this method does not forward them.
    */
   async observe(
-    role: 'user' | 'assistant' | 'system' | 'tool',
+    role: ExtractionRole,
     content: string,
-    options?: { currentMood?: PADState; contentSentiment?: number },
+    options?: ExtractionObservationOptions & { currentMood?: PADState; contentSentiment?: number },
   ): Promise<ObservationNote[] | null> {
     this.ensureReady();
     if (!this.manager) {

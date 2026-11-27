@@ -11,6 +11,8 @@
 import type { MemoryRetrievalPolicy } from '../../../rag/unified/policy.js';
 import type { PathNameProblem } from '../../../../core/utils/pathName.js';
 import type { ForgottenLedger, ForgottenLedgerOptions } from '../../suppression/ForgottenLedger.js';
+import type { MemorySourceType } from '../../core/types.js';
+import type { ExtractionCallOptions, ExtractionSetting } from '../../extraction/policy.js';
 
 // ---------------------------------------------------------------------------
 // Embedding configuration
@@ -201,6 +203,15 @@ export interface IngestionConfig {
  */
 export interface MemoryConfig {
   /**
+   * Reserved for the conversational extraction pipeline. It has no effect in
+   * this release: `remember()` stores the text it is given, literally,
+   * whatever value this holds.
+   *
+   * @internal
+   */
+  extraction?: ExtractionSetting;
+
+  /**
    * Persistence backend for memory traces.
    *
    * The Phase 1 facade currently implements the SQLite path at runtime.
@@ -313,8 +324,20 @@ export interface MemoryConfig {
 
 /**
  * Options for storing a new memory trace via `Memory.remember()`.
+ *
+ * The inherited `ExtractionCallOptions` fields (`inputKind`, `turnId`, `role`,
+ * `subjectId`, `extraction`) are reserved for the conversational extraction
+ * pipeline and have no effect in this release: `remember()` does not read them.
  */
-export interface RememberOptions {
+export interface RememberOptions extends ExtractionCallOptions {
+  /**
+   * Reserved for the conversational extraction pipeline. It has no effect in
+   * this release: `remember()` does not read it.
+   *
+   * @internal
+   */
+  sourceType?: MemorySourceType;
+
   /**
    * Tulving memory type.
    * @example 'episodic' | 'semantic' | 'procedural' | 'prospective'

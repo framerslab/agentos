@@ -11,6 +11,7 @@ import type { MemoryBudgetAllocation } from './types.js';
 import type { RecallCaptureMode } from '../retrieval/recall/capture.js';
 import type { RecallConstants } from '../retrieval/recall/fuse.js';
 import type { InfiniteContextConfig } from '../pipeline/context/types.js';
+import type { ExtractionSetting, PersonaExtractionOptions } from '../extraction/policy.js';
 
 // ---------------------------------------------------------------------------
 // PAD state (inlined to avoid circular dep with wunderland)
@@ -236,6 +237,15 @@ export interface ConsolidationConfig {
  */
 export interface CognitiveMemoryPersonaConfig {
   /**
+   * Reserved for the conversational extraction pipeline. It has no effect in
+   * this release: nothing reads a persona's extraction settings when memory is
+   * built or used.
+   *
+   * @internal
+   */
+  extraction?: boolean | PersonaExtractionOptions;
+
+  /**
    * Feature detection strategy. Nothing in agentos reads it yet:
    * `createAgentCognitiveMemory` runs `'keyword'`, as it has no LLM invoker for
    * `'llm'` or `'hybrid'`.
@@ -303,6 +313,16 @@ export interface CognitiveMemoryPersonaConfig {
 // ---------------------------------------------------------------------------
 
 export interface CognitiveMemoryConfig {
+  /**
+   * Reserved for the conversational extraction pipeline. It has no effect in
+   * this release: the manager builds the observer, the reflector and the typed
+   * network from `observer`, `reflector` and `typedNetwork` alone, and their
+   * model callbacks run as configured whatever value this holds.
+   *
+   * @internal
+   */
+  extraction?: ExtractionSetting;
+
   // --- Existing AgentOS dependencies ---
   workingMemory: IWorkingMemory;
   knowledgeGraph: IKnowledgeGraph;

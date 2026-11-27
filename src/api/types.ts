@@ -12,6 +12,7 @@ import type { FallbackProviderEntry, FallbackSignal } from './generateText.js';
 import type { CognitionConfig, CognitionProfile } from './runtime/gmiCognition.js';
 import type { StorageAdapter } from '@framers/sql-storage-adapter';
 import type { MemoryRecallConfig } from '../cognition/memory/core/config.js';
+import type { ExtractionSetting } from '../cognition/memory/extraction/policy.js';
 
 export type { MemoryRecallConfig };
 
@@ -75,6 +76,15 @@ export type AgencyStrategy =
  * enable defaults, or supply this object for explicit control.
  */
 export interface MemoryConfig {
+  /**
+   * Reserved for the conversational extraction pipeline. It has no effect in
+   * this release: the agent's memory is built and behaves the same whatever
+   * value it holds.
+   *
+   * @internal
+   */
+  extraction?: ExtractionSetting;
+
   /** When `true` in a multi-agent context, all agents share the same memory store. */
   shared?: boolean;
   /** Which memory subsystems to activate. */
