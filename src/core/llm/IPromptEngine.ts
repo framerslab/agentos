@@ -189,13 +189,14 @@ export interface PromptComponents {
   applicationNote?: string;
   /**
    * The tokens of what the request carries beside this prompt, or has written into it after it is built, so the
-   * engine cannot count them: tool schemas sent as a request parameter, a response schema's payload, a system message
-   * the caller adds to the built prompt. PromptEngine holds the prompt to the model's budget less this figure: it
-   * reduces the earlier history and `retrievedContext` to fit what is left, and writes the
-   * `TOKEN_BUDGET_EXCEEDED_POST_OPT` warning when the parts it never reduces are over it. The shares of the budget
-   * (history, retrieved context) stay shares of the model's whole budget. `estimateFixedPromptTokens` counts it, as a
-   * part nothing reduces. Unset, not a finite number, or not above 0, nothing is reserved. The GMI sets it per model
-   * hop, in the engine's own estimate (`estimateTokenCount`); an engine that does not read it reserves nothing.
+   * engine cannot count them: tool schemas sent as a request parameter, a response schema's payload, other request
+   * parameters, a system message the caller adds to the built prompt. PromptEngine holds the prompt to the model's
+   * budget less this figure: it reduces the earlier history and `retrievedContext` to fit what is left, and writes
+   * the `TOKEN_BUDGET_EXCEEDED_POST_OPT` warning when the parts it never reduces are over it. The shares of the
+   * budget (history, retrieved context) stay shares of the model's whole budget. `estimateFixedPromptTokens` counts
+   * it, as a part nothing reduces. Unset, not a finite number, or not above 0, nothing is reserved. The GMI sets it
+   * per model hop, in the engine's own estimate (`estimateTokenCount`); an engine that does not read it reserves
+   * nothing.
    */
   reservedTokens?: number;
   /** Assembled cognitive memory context (personality-affected, token-budgeted). Not read by PromptEngine: the GMI passes its text as `memoryContextText`. */
@@ -630,11 +631,12 @@ export interface IPromptEngine {
    * `reservedTokens`; the memory block, the other retrieved context and the history before the turn are left out.
    *
    * The GMI holds a turn's memory block to what this figure and what the hop's request carries beside the prompt
-   * (the tool schemas it sends, and a response schema's instruction or payload) leave of the model's context, since
-   * the block is never reduced either. It calls the method with components that carry no `reservedTokens` and adds
-   * that count itself, then passes the count as `reservedTokens` when the prompt is built. It reads the engine's
-   * count of a block's token through `estimateTokenCount`, so the block fits there by this engine's count. An engine
-   * without the method gets no such bound: its block is sized by the model's retrieved-context share alone.
+   * (the tool schemas it sends, a response schema's instruction or payload, a forwarded response format and the
+   * passthrough parameters) leave of the model's context, since the block is never reduced either. It calls the
+   * method with components that carry no `reservedTokens` and adds that count itself, then passes the count as
+   * `reservedTokens` when the prompt is built. It reads the engine's count of a block's token through
+   * `estimateTokenCount`, so the block fits there by this engine's count. An engine without the method gets no such
+   * bound: its block is sized by the model's retrieved-context share alone.
    *
    * @async
    * @param {Readonly<PromptComponents>} components - The prompt's components, as `constructPrompt` takes them.

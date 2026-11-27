@@ -126,10 +126,10 @@ export interface MemoryRecallCapture {
     /**
      * The parts of the hop's request that are never reduced, in tokens, as the prompt engine counts them: the system
      * prompt, the current turn's messages, the note's frame line and the host's note, the tool schemas where the hop's
-     * request carries them, and the turn's response schema as the hop carries it, its instruction in the prompt or its
-     * payload beside it (a GMI turn's record, on a prompt engine that counts them). The last two are the reservation
-     * the hop's prompt is built with (`PromptComponents.reservedTokens`). The block's budget is never above the
-     * model's context less this.
+     * request carries them, the turn's response schema as the hop carries it, its instruction in the prompt or its
+     * payload beside it, a forwarded response format and the request's passthrough parameters (a GMI turn's record,
+     * on a prompt engine that counts them). The last four are the reservation the hop's prompt is built with
+     * (`PromptComponents.reservedTokens`). The block's budget is never above the model's context less this.
      */
     fixedPromptTokens?: number;
     /**

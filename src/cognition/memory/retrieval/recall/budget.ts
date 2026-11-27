@@ -12,8 +12,8 @@ import { recallLog } from './log.js';
  * share ({@link PROMPT_CONTEXT_SHARE} of its context) holds less is sent a smaller block ({@link effectiveRecallBudget}):
  * the whole 6,400 reaches a model of 32,000 tokens of context or more, on a turn with no other retrieved context whose
  * fixed parts leave 6,400 tokens of that context: the system prompt, the current turn's messages, the note's frame line
- * and the host's note, the tool schemas the request carries and the turn's response schema as its instruction or its
- * payload.
+ * and the host's note, the tool schemas the request carries, the turn's response schema as its instruction or its
+ * payload, a response format the turn forwards, and the request's passthrough parameters.
  */
 export const DEFAULT_RECALL_BUDGET_TOKENS = 6400;
 
@@ -256,9 +256,10 @@ export interface EffectiveRecallBudget {
  *
  * The fixed parts are the ones no step of the prompt's budget reduces: the system prompt, the current turn's messages,
  * the note's frame line and the host's note, and what the request carries beside the prompt, which the prompt is built
- * with as its reservation (`PromptComponents.reservedTokens`): the tool schemas, where the request carries them, and the
- * turn's response schema as its instruction or its payload. The memory block is never reduced either, so without this
- * bound a block that fits the share can still take the request past the model's context.
+ * with as its reservation (`PromptComponents.reservedTokens`): the tool schemas, where the request carries them, the
+ * turn's response schema as its instruction or its payload, a forwarded response format and the request's passthrough
+ * parameters (`customModelParams`). The memory block is never reduced either, so without this bound a block that fits
+ * the share can still take the request past the model's context.
  *
  * The block's budget is in the assembler's tokens (four characters each) and the fixed parts are in the prompt
  * engine's, which on some model ids counts fewer characters a token: 3.8 for PromptEngine on an id containing
