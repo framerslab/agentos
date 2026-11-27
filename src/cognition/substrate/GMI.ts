@@ -1172,13 +1172,37 @@ export class GMI implements IGMI {
   }
 
   /**
+   * Whether a hop's request is sent the turn's response schema in place of the response format the turn forwards
+   * (`responseFormat`). A request without a response schema is sent the format as given. One with a response schema
+   * is sent the schema in its place where the gateway says so (`responseFormatReplacedWithSchema`): the gateway of
+   * `createCompletionGateway` does and says so, and a gateway without the method, or one that answers false, may pass
+   * the turn's options through to its provider as they are, format included. A GMI without a gateway sends the
+   * provider the turn's options as they are.
+   *
+   * @param resolution - The hop, when a completion gateway resolved one.
+   * @param responseSchema - The turn's response schema, when it has one.
+   * @returns Whether the forwarded format is left out of the hop's request. A gateway whose answer throws counts as
+   *   sending it.
+   */
+  private formatReplacedOn(resolution: CompletionResolution | null, responseSchema: ZodType | undefined): boolean {
+    const gateway = this.config.completionGateway;
+    if (!gateway || !resolution || !responseSchema) return false;
+    try {
+      // A gateway without the method answers undefined, which counts as sending the format.
+      return gateway.responseFormatReplacedWithSchema?.(resolution) === true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
    * The tokens of what a hop's request carries beside the prompt the engine builds, or has written into that prompt
    * after it is built, so the engine's budget step cannot count them: the tool schemas the request offers, as the
    * engine's estimate of their JSON, and the turn's response schema as the hop carries it: its instruction when the
    * hop's prompt carries the schema (a system message written in after the build), and its payload, as the engine's
-   * estimate of its JSON, when the hop's request carries the schema as a parameter. On a hop with no response schema
-   * the gateway lowers, the response format the turn forwards (`responseFormat`, a JSON schema it carries included) is
-   * sent as given and counted the same way. So are the passthrough parameters (`customModelParams`), as the hop's
+   * estimate of its JSON, when the hop's request carries the schema as a parameter. The response format the turn
+   * forwards (`responseFormat`, a JSON schema it carries included) is sent as given and counted the same way, except
+   * where the gateway sends the lowered response schema in its place ({@link formatReplacedOn}). So are the passthrough parameters (`customModelParams`), as the hop's
    * provider sends them ({@link customModelParamsAsSent}): without the keys that provider strips (Gemini's fields on an
    * OpenAI hop, OpenAI's `response_format` on a Gemini or Anthropic hop). A provider that writes them over its
    * request's top-level fields, last, sends their `tools` in place of the tool schemas and their `response_format` in
@@ -1194,7 +1218,7 @@ export class GMI implements IGMI {
    * @param schemaInstruction - The response schema's instruction the hop's prompt is sent with, when it has one.
    * @param schemaPayload - The provider payload the hop's request carries the response schema in, when it has one.
    * @param responseFormat - The response format the turn forwards, where the hop's request is sent it as given (no
-   *   response schema the gateway lowers in its place).
+   *   response schema the gateway sends in its place, {@link formatReplacedOn}).
    * @param passthrough - The passthrough parameters (`customModelParams`) the hop's request is given.
    * @returns The count, 0 when the request carries none of them; undefined when the engine has no
    *   `estimateTokenCount`, or its count failed or was not a finite number of at least 0 (one reasoning-trace
@@ -2594,7 +2618,7 @@ export class GMI implements IGMI {
           // built with these tokens taken off its budget, so the earlier history and the other retrieved context are
           // kept only where the request has room for them, and the memory block is sized beside them.
           // The options as this hop is sent them: a fallback entry's replace the turn's. A response schema the gateway
-          // lowers replaces the forwarded response format.
+          // lowers replaces the forwarded response format where the gateway says so.
           const hopOptions = resolution ? { ...llmOptions, ...resolution.optionOverrides } : llmOptions;
           const hopReservedTokens = await this.reservedTokensOf(
             modelTargetInfo.providerId,
@@ -2602,7 +2626,7 @@ export class GMI implements IGMI {
             this.toolsSentOn(resolution, responseSchema) ? llmOptions.tools : undefined,
             hopSchemaInstruction,
             hopSchemaPayload,
-            gateway && resolution && responseSchema ? undefined : hopOptions.responseFormat,
+            this.formatReplacedOn(resolution, responseSchema) ? undefined : hopOptions.responseFormat,
             hopOptions.customModelParams,
           );
           const ragTokens = estimateMemoryTokens(augmentedContextFromRAG);

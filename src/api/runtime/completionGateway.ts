@@ -286,6 +286,15 @@ export interface CompletionGateway {
    * written before it may send both, so both are counted.
    */
   toolsSentWithSchema?(resolution: CompletionResolution): boolean;
+  /**
+   * Whether `stream()` sends a hop's request the lowered response schema in place of the `responseFormat` the caller
+   * forwards in its options, when the request has a response schema. The gateway of `createCompletionGateway` answers
+   * true: it sends such a request the schema's payload and drops the forwarded format. A caller that sizes a request
+   * for the model's context (the GMI) leaves the forwarded format out of its count only where this is true; a gateway
+   * without the method, or one that answers false, may pass the options through to its provider as they are, so the
+   * format is counted.
+   */
+  responseFormatReplacedWithSchema?(resolution: CompletionResolution): boolean;
 }
 
 /** The tool format a provider expects; the same mapping as GMI.determineToolFormat. */
@@ -1090,5 +1099,10 @@ export function createCompletionGateway(defaults: Partial<CompletionRoute> = {})
     return false;
   }
 
-  return { resolve, stream, schemaInstruction, schemaPayload, toolsSentWithSchema };
+  /** A request with a response schema carries the hop's lowering of it: `stream()` writes it over the forwarded `responseFormat`, on every hop. */
+  function responseFormatReplacedWithSchema(): boolean {
+    return true;
+  }
+
+  return { resolve, stream, schemaInstruction, schemaPayload, toolsSentWithSchema, responseFormatReplacedWithSchema };
 }
