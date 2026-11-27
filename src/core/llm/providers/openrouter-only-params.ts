@@ -164,3 +164,56 @@ export function stripParamsForGemini(
     ...ANTHROPIC_ONLY_PARAM_KEYS,
   ]);
 }
+
+/**
+ * The passthrough parameters (`customModelParams`) as a provider writes them
+ * into its request, for a caller that counts what the request carries:
+ *
+ *  - `params`: what the provider sends of them, after its own strip above;
+ *    undefined when it sends none (Groq, Mistral, Together, xAI, LiteLLM and
+ *    the CLI bridges never read `customModelParams`).
+ *  - `atRoot`: whether the provider writes them over its request's top-level
+ *    fields, last, so a passthrough `tools` replaces the tools it built and a
+ *    passthrough `response_format` replaces its structured-output field.
+ *    OpenAI, MiniMax, OpenRouter, Requesty, Anthropic and Gemini do (Anthropic
+ *    and Gemini strip `response_format` first, and still send their own
+ *    structured output); Ollama writes them into its `options` bag, where they
+ *    replace nothing of that kind.
+ *
+ * A provider id outside this list (a host's own provider) is taken to send
+ * them whole and to replace nothing, so a count over them never falls short.
+ *
+ * @param providerId - The provider that serves the request.
+ * @param params - The request's `customModelParams`.
+ */
+export function customModelParamsAsSent(
+  providerId: string | undefined,
+  params: Record<string, unknown> | undefined,
+): { params: Record<string, unknown> | undefined; atRoot: boolean } {
+  switch (providerId) {
+    case 'openai':
+    case 'minimax':
+      return { params: stripParamsForOpenAI(params), atRoot: true };
+    case 'openrouter':
+      return { params: stripGeminiOnlyParams(params), atRoot: true };
+    case 'requesty':
+      return { params, atRoot: true };
+    case 'anthropic':
+      return { params: stripParamsForAnthropic(params), atRoot: true };
+    case 'gemini':
+      // `topK` and `thinkingConfig` move into `generationConfig`, still sent.
+      return { params: stripParamsForGemini(params), atRoot: true };
+    case 'ollama':
+      return { params: stripForeignVendorParams(params), atRoot: false };
+    case 'groq':
+    case 'mistral':
+    case 'together':
+    case 'xai':
+    case 'litellm':
+    case 'claude-code-cli':
+    case 'gemini-cli':
+      return { params: undefined, atRoot: false };
+    default:
+      return { params, atRoot: false };
+  }
+}

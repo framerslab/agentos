@@ -55,6 +55,7 @@ import { IRetrievalAugmentor, RagRetrievalOptions, RagDocumentInput, RagIngestio
 
 import { ChatMessage, IProvider, MessageContentPart, ModelCompletionOptions, ModelCompletionResponse, ModelUsage, ThinkingBlock } from '../../core/llm/providers/IProvider';
 import { resolveCacheCapabilities } from '../../core/llm/providers/model-cache-capabilities';
+import { customModelParamsAsSent } from '../../core/llm/providers/openrouter-only-params';
 import type { ZodType } from 'zod';
 import type { CompletionAttempt, CompletionOutcome, CompletionResolution, CompletionRoute } from '../../api/runtime/completionGateway.js';
 import { checkStructuredReply, resolveStructuredReply, STRUCTURED_REPLY_REFUSED_ISSUE, structuredRepairMessage, StructuredReplyConfigError, type StructuredReplyOutput } from '../../api/runtime/structuredReply.js';
@@ -1177,25 +1178,30 @@ export class GMI implements IGMI {
    * hop's prompt carries the schema (a system message written in after the build), and its payload, as the engine's
    * estimate of its JSON, when the hop's request carries the schema as a parameter. On a hop with no response schema
    * the gateway lowers, the response format the turn forwards (`responseFormat`, a JSON schema it carries included) is
-   * sent as given and counted the same way. So are the passthrough parameters (`customModelParams`), whole: a provider
-   * writes them into its request last, as given, so their `tools` replace the tool schemas on the wire and their
-   * `response_format` replaces the response format or the schema's payload, and what they replace is not counted
-   * beside them. The GMI passes the count to the prompt build (`PromptComponents.reservedTokens`), which holds the
+   * sent as given and counted the same way. So are the passthrough parameters (`customModelParams`), as the hop's
+   * provider sends them ({@link customModelParamsAsSent}): without the keys that provider strips (Gemini's fields on an
+   * OpenAI hop, OpenAI's `response_format` on a Gemini or Anthropic hop). A provider that writes them over its
+   * request's top-level fields, last, sends their `tools` in place of the tool schemas and their `response_format` in
+   * place of the response format or the schema's payload, and what they replace is not counted beside them; Gemini
+   * and Anthropic strip `response_format` and still send the schema's payload, so it is counted there. The GMI passes
+   * the count to the prompt build (`PromptComponents.reservedTokens`), which holds the
    * prompt to the model's context less it, and adds it to the prompt's fixed parts for the memory block's budget
    * ({@link fixedPromptPartsOf}).
    *
+   * @param providerId - The hop's provider, which decides what of the passthrough parameters is sent.
    * @param modelId - The hop's model.
    * @param tools - The tool schemas the hop's request carries ({@link toolsSentOn}); none when it carries none.
    * @param schemaInstruction - The response schema's instruction the hop's prompt is sent with, when it has one.
    * @param schemaPayload - The provider payload the hop's request carries the response schema in, when it has one.
    * @param responseFormat - The response format the turn forwards, where the hop's request is sent it as given (no
    *   response schema the gateway lowers in its place).
-   * @param passthrough - The passthrough parameters (`customModelParams`) the hop's request is sent with.
+   * @param passthrough - The passthrough parameters (`customModelParams`) the hop's request is given.
    * @returns The count, 0 when the request carries none of them; undefined when the engine has no
    *   `estimateTokenCount`, or its count failed or was not a finite number of at least 0 (one reasoning-trace
    *   warning), so the prompt is built with nothing reserved.
    */
   private async reservedTokensOf(
+    providerId: string | undefined,
     modelId: string,
     tools: ModelCompletionOptions['tools'],
     schemaInstruction: string | undefined,
@@ -1203,10 +1209,16 @@ export class GMI implements IGMI {
     responseFormat: ModelCompletionOptions['responseFormat'] | undefined,
     passthrough: ModelCompletionOptions['customModelParams'] | undefined,
   ): Promise<number | undefined> {
-    const passthroughJson = jsonOrEmpty(passthrough && typeof passthrough === 'object' && Object.keys(passthrough).length > 0 ? passthrough : undefined);
+    const asSent = customModelParamsAsSent(
+      providerId,
+      passthrough && typeof passthrough === 'object' ? (passthrough as Record<string, unknown>) : undefined,
+    );
+    const sentPassthrough = asSent.params && Object.keys(asSent.params).length > 0 ? asSent.params : undefined;
+    const passthroughJson = jsonOrEmpty(sentPassthrough);
     const passthroughSets = (key: string): boolean =>
-      passthroughJson !== '' && (passthrough as Record<string, unknown>)[key] !== undefined;
-    // What the passthrough parameters set replaces the option of the same wire name, so it is counted once, with them.
+      asSent.atRoot && passthroughJson !== '' && sentPassthrough?.[key] !== undefined;
+    // What the passthrough parameters the provider writes over its request set replaces the option of the same wire
+    // name, so it is counted once, with them.
     const sentTools = passthroughSets('tools') ? undefined : tools;
     const hasTools = Array.isArray(sentTools) && sentTools.length > 0;
     const sentPayload = passthroughSets('response_format') ? undefined : schemaPayload;
@@ -2585,6 +2597,7 @@ export class GMI implements IGMI {
           // lowers replaces the forwarded response format.
           const hopOptions = resolution ? { ...llmOptions, ...resolution.optionOverrides } : llmOptions;
           const hopReservedTokens = await this.reservedTokensOf(
+            modelTargetInfo.providerId,
             modelTargetInfo.modelId,
             this.toolsSentOn(resolution, responseSchema) ? llmOptions.tools : undefined,
             hopSchemaInstruction,
