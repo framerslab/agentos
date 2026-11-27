@@ -9,6 +9,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import pino from 'pino';
+import { z } from 'zod';
 vi.mock('../../core/llm/providers/implementations/OpenAIProvider', async () => ({ OpenAIProvider: (await import('./helpers/stubProviders')).stubProviderClass('openai') }));
 vi.mock('../../core/llm/providers/implementations/AnthropicProvider', async () => ({ AnthropicProvider: (await import('./helpers/stubProviders')).stubProviderClass('anthropic') }));
 // Trace ids from a counter that each agent starts again: the block lists the ids of the traces in focus.
@@ -18,7 +19,7 @@ vi.mock('../../cognition/memory/core/util/crossPlatformCrypto', async (importOri
   return { ...actual, uuid: () => `trace-${String(++ids.next).padStart(4, '0')}` };
 });
 import { agent, type AgentOptions } from '../agent';
-import { reply, script, type ProviderScript } from './helpers/stubProviders';
+import { reply, script, systemTextOf, type ProviderScript } from './helpers/stubProviders';
 import { globalLLMProviderHealth } from '../../core/safety/LLMProviderHealthRegistry';
 import { resetLoggerFactory, setLogger } from '../../core/logging/loggerFactory';
 import type { ChatMessage } from '../../core/llm/providers/IProvider';
@@ -473,5 +474,75 @@ describe("agent({ runtime: 'gmi' }) memory budget across a fallback hop", () => 
     expect(record.delivery).toEqual({ memoryBlockTokens: expect.any(Number) });
     expect(record.delivery!.memoryBlockTokens).toBeGreaterThan(0);
     expect(events('memory.recall.budget_clamped')).toEqual([expect.objectContaining({ requested: 1600, effective: 600, hop: 0, reason: 'prompt_share' })]);
+  });
+});
+
+describe("agent({ runtime: 'gmi' }) memory budget beside a response schema the prompt carries", () => {
+  it("the schema's instruction is one of the prompt's fixed parts: the block is sized beside it, and the request fits the model's context", async () => {
+    ids.next = 0;
+    const WINDOW = 8_000;
+    // PromptEngine's estimate on a Claude model id: 4.2 characters a token.
+    const engineTokensOf = (text: string) => Math.ceil(text.length / 4.2);
+    // Claude Sonnet 5.5 takes a schema with a record in no payload, so the request carries it in a system message of
+    // its own, written after PromptEngine built the prompt. Long field descriptions make that message a long one.
+    const about = (what: string) => Array.from({ length: 30 }, () => what).join(' ');
+    const schema = z.object({
+      pier: z.string().describe(about('The pier the island ferry leaves from, as the harbor office posts it.')),
+      crossings: z.record(z.string(), z.number()).describe(about('How many crossings the island ferry makes in each part of the day.')),
+      desk: z.string().optional().describe(about('Where the ticket desk for that pier stands and when it opens.')),
+      note: z.string().optional().describe(about('Anything the harbor office added to its log for the day.')),
+    });
+    const answer = '{"pier":"Pier 3","crossings":{"morning":2}}';
+    const k = key(); const emb = key();
+    const s = script('anthropic', k, { window: WINDOW, replies: [...STATEMENTS.map(() => reply.text('Noted.')), reply.text(answer), reply.text(answer)] });
+    script('openai', emb, { replies: [] });
+    vi.stubEnv('OPENAI_API_KEY', emb);
+    const a = agent({
+      runtime: 'gmi',
+      name: 'Harbor',
+      provider: 'anthropic',
+      model: 'claude-sonnet-5-5',
+      apiKey: k,
+      fallbackProviders: [],
+      cognition: { memory: { embedding: { provider: 'openai' } }, mechanisms: false },
+    } as unknown as AgentOptions);
+    try {
+      const session = a.session('s');
+      for (const statement of STATEMENTS) await session.send(statement);
+      // A short question first, to read how many tokens the system text takes with the schema's instruction in it.
+      session.clear();
+      await session.send(QUESTION, { responseSchema: schema, schemaName: 'crossing_report' });
+      const systemTokens = engineTokensOf(systemTextOf(s.seen[STATEMENTS.length].messages));
+      expect(systemTokens).toBeGreaterThan(500);
+      expect(systemTokens).toBeLessThan(WINDOW - 2_000);
+
+      // A question that, with that system text, leaves about 600 tokens of the model's context: less than the 1,600
+      // its retrieved-context share holds, and less than the block the twelve notes fill.
+      const filler = Array.from({ length: 400 }, (_, i) => `Background paragraph ${i}: the island ferry leaves its pier and the ticket desk opens before each crossing.`).join(' ');
+      const question = `${QUESTION} ${filler}`.slice(0, Math.floor((WINDOW - systemTokens - 600) * 4.2));
+      session.clear();
+      logged.length = 0;
+      const result = await session.send(question, { responseSchema: schema, schemaName: 'crossing_report' });
+      expect(result.object).toEqual({ pier: 'Pier 3', crossings: { morning: 2 } });
+
+      // The request the model received fits its context, by PromptEngine's estimate of each text it carries.
+      const request = s.seen[STATEMENTS.length + 1];
+      expect(request, 'the question reached the model').toBeDefined();
+      expect(systemTextOf(request.messages)).toContain('as the harbor office posts it.');
+      const block = memoryBlockOf(s, STATEMENTS.length + 1);
+      const sent = request.messages.flatMap(textPartsOf).reduce((sum, text) => sum + engineTokensOf(text), 0);
+      expect(sent, `the request, its memory block ${engineTokensOf(block)} tokens`).toBeLessThanOrEqual(WINDOW);
+
+      // The record counts the instruction among the fixed parts, and the block's budget is what they leave.
+      const budget = result.memoryRecall!.budget;
+      expect(budget).toMatchObject({ requested: DEFAULT_RECALL_BUDGET_TOKENS, clampReason: 'fixed_prompt', promptShareTokens: 1600, otherContextTokens: 0, hop: 0, reassembled: true });
+      expect(budget.fixedPromptTokens).toBeGreaterThanOrEqual(engineTokensOf(systemTextOf(request.messages)) + engineTokensOf(question));
+      expect(budget.effective).toBe(WINDOW - budget.fixedPromptTokens!);
+      expect(budget.effective).toBeGreaterThan(300);
+      expect(tokensOf(block)).toBeLessThanOrEqual(budget.effective);
+      expect(events('memory.recall.budget_clamped')).toEqual([expect.objectContaining({ requested: DEFAULT_RECALL_BUDGET_TOKENS, hop: 0, reason: 'fixed_prompt' })]);
+    } finally {
+      await a.close();
+    }
   });
 });

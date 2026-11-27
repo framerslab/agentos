@@ -176,6 +176,37 @@ describe('GMI memory block on a small model', () => {
     expect(prompt).not.toContain('…[cut]');
   });
 
+  it("on a model id PromptEngine counts with fewer characters a token than the assembler, the block PromptEngine counts still fits what the fixed parts leave", async () => {
+    mem = await ferryMemory();
+    // gpt-4o-mini: PromptEngine counts 3.8 characters a token and the assembler 4, so a block of 1,000 of the
+    // assembler's tokens (4,000 characters) reads 1,053 by PromptEngine's count. On 8,000 tokens of context a question
+    // of about 7,400 of PromptEngine's tokens leaves about 500, and the block's budget is what holds 500 by that count.
+    const engineTokensOf = (text: string) => Math.ceil(text.length / 3.8);
+    const filler = Array.from({ length: 264 }, (_, i) => `Background paragraph ${i}: the island ferry leaves its pier and the ticket desk opens before each crossing.`).join(' ');
+    const question = `Which pier does the island ferry leave from? ${filler}`;
+    expect(engineTokensOf(question)).toBeGreaterThan(7_400);
+    expect(engineTokensOf(question)).toBeLessThan(7_440);
+    const { provider } = scriptedProvider([textReply('Pier 3.')]);
+    const { gmi } = await createScriptedGmi({
+      provider,
+      persona: { defaultModelId: 'gpt-4o-mini' },
+      config: { cognitiveMemory: mem.manager.forSession(), llmProviderManager: smallWindowManager(provider, 8_000) },
+    });
+    const { output } = await runTurn(gmi, textTurn('t1', question));
+    const capture = output.memoryRecall as MemoryRecallCapture;
+    expect(capture).toBeDefined();
+    expect(capture.budget).toMatchObject({ requested: 1600, clampReason: 'fixed_prompt', promptShareTokens: 1600, otherContextTokens: 0, hop: 0, reassembled: true });
+    const left = 8_000 - capture.budget.fixedPromptTokens!;
+    expect(left).toBeGreaterThan(300);
+    expect(left).toBeLessThan(700);
+    expect(capture.budget.effective).toBe(Math.floor(left / 1.053));
+    expect(capture.tokensUsed).toBeLessThanOrEqual(capture.budget.effective);
+    // PromptEngine's own count of the block is within what the fixed parts left, and of the prompt within its budget.
+    expect(capture.delivery).toEqual({ memoryBlockTokens: expect.any(Number) });
+    expect(capture.delivery!.memoryBlockTokens).toBeGreaterThan(0);
+    expect(capture.delivery!.memoryBlockTokens).toBeLessThanOrEqual(left);
+  });
+
   it('a re-render that fails sends the model no block, and the record says the render failed, not that the budget left the memories out', async () => {
     mem = await ferryMemory();
     // The first test's 8,000-token model and long-term-memory text: the block must be rendered again at about 200.
