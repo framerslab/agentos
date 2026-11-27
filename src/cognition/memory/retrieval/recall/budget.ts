@@ -11,7 +11,9 @@ import { recallLog } from './log.js';
  * The memory block's budget, in tokens, when no `recall.budget.totalTokens` is set. A model whose retrieved-context
  * share ({@link PROMPT_CONTEXT_SHARE} of its context) holds less is sent a smaller block ({@link effectiveRecallBudget}):
  * the whole 6,400 reaches a model of 32,000 tokens of context or more, on a turn with no other retrieved context whose
- * system prompt, current turn and tool schemas leave 6,400 tokens of that context.
+ * fixed parts leave 6,400 tokens of that context: the system prompt, the current turn's messages, the note's frame line
+ * and the host's note, the tool schemas the request carries and the turn's response schema as its instruction or its
+ * payload.
  */
 export const DEFAULT_RECALL_BUDGET_TOKENS = 6400;
 
@@ -228,7 +230,10 @@ export interface EffectiveRecallBudget {
   promptShareTokens?: number;
   /** The turn's other retrieved context, in tokens, which the share holds first. */
   otherContextTokens?: number;
-  /** The parts of the prompt that are never reduced, in tokens, when the caller counted them. */
+  /**
+   * The parts of the request that are never reduced, in tokens, when the caller counted them: the prompt's fixed parts
+   * and what the request carries beside the prompt (the reservation).
+   */
   fixedPromptTokens?: number;
   /**
    * How many tokens the prompt engine counts for one of the block's own on this model, when that is more than 1: what
@@ -250,8 +255,10 @@ export interface EffectiveRecallBudget {
  * below 0.
  *
  * The fixed parts are the ones no step of the prompt's budget reduces: the system prompt, the current turn's messages,
- * the host's note and the tool schemas. The memory block is never reduced either, so without this bound a block that
- * fits the share can still take the request past the model's context.
+ * the note's frame line and the host's note, and what the request carries beside the prompt, which the prompt is built
+ * with as its reservation (`PromptComponents.reservedTokens`): the tool schemas, where the request carries them, and the
+ * turn's response schema as its instruction or its payload. The memory block is never reduced either, so without this
+ * bound a block that fits the share can still take the request past the model's context.
  *
  * The block's budget is in the assembler's tokens (four characters each) and the fixed parts are in the prompt
  * engine's, which on some model ids counts fewer characters a token: 3.8 for PromptEngine on an id containing
@@ -262,8 +269,8 @@ export interface EffectiveRecallBudget {
  * @param i.totalTokens - The configured budget.
  * @param i.contextTokens - The model's context size as PromptEngine budgets it (`optimalContextTokens`, else `maxContextTokens`).
  * @param i.otherContextTokens - The tokens of the turn's other retrieved context.
- * @param i.fixedPromptTokens - The tokens of the prompt's fixed parts, as the prompt engine counts them. Unset, the
- *   context bound is not applied.
+ * @param i.fixedPromptTokens - The tokens of the request's fixed parts, the reservation among them, as the prompt
+ *   engine counts them. Unset, the context bound is not applied.
  * @param i.blockTokenRate - The prompt engine's count of one of the block's tokens on this model. Unset, not a finite
  *   number, or at most 1, it is taken as 1.
  * @returns The budget, with `invalid` set when an input was not a finite number in range.
