@@ -1,7 +1,8 @@
 /**
  * @fileoverview The manager's `extraction` setting is reserved: whatever it
  * holds, the manager builds the observer, the reflector and the typed-network
- * encode trigger from the same fields it reads when the setting is omitted.
+ * encode trigger from the same fields it reads when the setting is omitted, and
+ * an observed note reaches the reflector's model callback.
  *
  * @module memory/__tests__/CognitiveMemoryManager.extraction-reserved.test
  */
@@ -93,7 +94,7 @@ const settings: Array<[string, Pick<CognitiveMemoryConfig, 'extraction'>]> = [
 
 describe('CognitiveMemoryManager: the extraction setting is reserved', () => {
   it.each(settings)(
-    'builds the observer, the reflector and the encode trigger as before when extraction is %s',
+    'builds the observer, the reflector and the encode trigger as before, and hands a note to the reflector, when extraction is %s',
     async (_label, setting) => {
       const observerInvoker = vi.fn(async () =>
         JSON.stringify({
@@ -103,7 +104,7 @@ describe('CognitiveMemoryManager: the extraction setting is reserved', () => {
           entities: ['matte paper'],
         }),
       );
-      const reflectorInvoker = vi.fn(async () => '{}');
+      const reflectorInvoker = vi.fn<(system: string, user: string) => Promise<string>>(async () => '{}');
       const typedInvoke = vi.fn(async () =>
         JSON.stringify({
           facts: [
@@ -127,7 +128,8 @@ describe('CognitiveMemoryManager: the extraction setting is reserved', () => {
           ...setting,
           // One buffered message reaches the observer's model callback.
           observer: { llmInvoker: observerInvoker, activationThresholdMessages: 1 },
-          reflector: { llmInvoker: reflectorInvoker },
+          // One note reaches the reflector's model callback.
+          reflector: { llmInvoker: reflectorInvoker, activationThresholdNotes: 1 },
           typedNetwork: {
             variant: 'minimal',
             extractAtEncode: true,
@@ -144,6 +146,9 @@ describe('CognitiveMemoryManager: the extraction setting is reserved', () => {
         const notes = await manager.observe('user', 'I print on matte paper.', mood);
         expect(notes?.map((note) => note.content)).toEqual(['The user prints on matte paper.']);
         expect(observerInvoker).toHaveBeenCalledOnce();
+        // The observer's note reaches the reflector, whose model callback reads it.
+        expect(reflectorInvoker).toHaveBeenCalledOnce();
+        expect(reflectorInvoker.mock.calls[0]?.[1]).toContain('The user prints on matte paper.');
 
         // The encode trigger sends the input to the typed-network callback and files its fact.
         const trace = await manager.encode('Berlin is in Germany.', mood, 'neutral');
