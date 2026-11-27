@@ -261,4 +261,22 @@ describe("PromptEngine's history count of tool calls, by what the template sends
       expect(built.modificationDetails?.historyOmitted).toBeUndefined();
     }
   });
+  it("a host's own template registered under a built-in's name that sends the calls has them counted", async () => {
+    // Registered over the Anthropic template's name: it sends each message with its tool calls.
+    await engine.registerTemplate('anthropic_messages', async (components) => [
+      ...(components.conversationHistory ?? []).map((message) => ({
+        role: message.role,
+        content: message.content,
+        ...(message.tool_calls ? { tool_calls: message.tool_calls } : {}),
+        ...(message.tool_call_id ? { tool_call_id: message.tool_call_id } : {}),
+      })),
+      { role: 'user', content: components.userInput ?? '' },
+    ] as never);
+    const model: ModelTargetInfo = { ...MODEL, promptFormatType: 'anthropic_messages' };
+    const built = await engine.constructPrompt({ ...base, conversationHistory: ROUNDS } as never, model, executionContext);
+    const text = JSON.stringify(built.prompt);
+    expect(text).toContain('Crossing 3 is logged.');
+    expect(text, 'the oldest round, whose calls this template sends').not.toContain('Crossing 0 is logged.');
+    expect(built.modificationDetails?.historyOmitted?.messages).toBeGreaterThan(0);
+  });
 });
