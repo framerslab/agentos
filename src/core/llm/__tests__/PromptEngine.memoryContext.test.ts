@@ -225,6 +225,36 @@ describe('PromptEngine memoryContextText', () => {
     expect(JSON.stringify(r.prompt)).toContain(JSON.stringify(MEMORY).slice(1, -1));
   });
 
+  it('estimateFixedPromptTokens counts the labels a list of retrieved context puts on the memory entry: beside an empty list, a memory text of the context less that count leaves the prompt within its budget', async () => {
+    // About 3,300 tokens of question on the 4,000-token model, and a host note, which the budget step counts as the
+    // estimate does. The retrieved context is a list with no entry: the template still sends the memory text as the
+    // list's first entry, under its `Source:` and `Content:` labels.
+    const components = {
+      ...base,
+      userInput: 'Which crossing suits a morning ferry? '.repeat(330),
+      applicationNote: 'The harbor office is closed on Mondays.',
+    };
+    const count = (c: Record<string, unknown>) => engine.estimateFixedPromptTokens(c as never, SMALL, baseExecutionContext);
+    const fixed = await count({ ...components, retrievedContext: [] });
+    const room = 4000 - fixed;
+    expect(room).toBeGreaterThan(400);
+    // A text PromptEngine counts as `tokens` on this model (3.8 characters a token).
+    const memoryOf = (tokens: number) => 'm'.repeat(Math.floor(tokens * 3.8));
+    const fits = await build({ ...components, retrievedContext: [], memoryContextText: memoryOf(room) });
+    expect(JSON.stringify(fits.prompt)).toContain(`Source: cognitive_memory\\nContent: ${memoryOf(room)}`);
+    expect(fits.issues?.map((issue) => issue.code) ?? []).not.toContain('TOKEN_BUDGET_EXCEEDED_POST_OPT');
+
+    // The labels are the count's difference from the same prompt with no list.
+    const withoutList = await count(components);
+    const labels = await engine.estimateTokenCount('Source: cognitive_memory\nContent: ', SMALL.modelId);
+    expect(labels).toBe(9);
+    expect(fixed).toBe(withoutList + labels);
+    // Beside entries, the blank line after the memory entry is counted too; the entries themselves are no fixed part.
+    expect(await count({ ...components, retrievedContext: [{ source: 'timetable', content: RAG_LONG }] })).toBe(
+      withoutList + (await engine.estimateTokenCount('Source: cognitive_memory\nContent: \n\n', SMALL.modelId)),
+    );
+  });
+
   it.each(['anthropic_messages', 'generic_completion'])('the %s template sends the memory block and the other context in front of the query', async (template) => {
     const model = { ...baseModelInfo, promptFormatType: template } as ModelTargetInfo;
     const r = await build({ ...base, memoryContextText: MEMORY, retrievedContext: RAG_SHORT }, model);

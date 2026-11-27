@@ -622,3 +622,171 @@ describe("agent({ runtime: 'gmi' }) memory budget beside a response schema the r
     }
   });
 });
+
+/** A tool whose description is `rows` lines long: 60 rows make its schema about 1,400 tokens of JSON, 300 about 7,000. */
+const timetableTool = (rows: number) => ({
+  description: Array.from({ length: rows }, (_, i) => `Timetable row ${i}: looks up when the island ferry leaves one pier on one crossing of the day.`).join(' '),
+  parameters: { type: 'object', properties: { pier: { type: 'string' } } },
+  execute: async () => ({ ok: true }),
+});
+/** The agent of `withRecall`, with no recall setting and one tool. */
+const withTool = (apiKey: string, timetable: ReturnType<typeof timetableTool>) =>
+  agent({
+    runtime: 'gmi',
+    name: 'Harbor',
+    provider: 'openai',
+    model: 'stub-model',
+    apiKey,
+    fallbackProviders: [],
+    tools: { timetable },
+    cognition: { memory: { embedding: { provider: 'openai' } }, mechanisms: false },
+  } as unknown as AgentOptions);
+/** A response schema of a hundred named fields: OpenAI takes it as a strict `json_schema` payload of about 2,500 tokens. */
+function longSchema() {
+  const logShape: Record<string, z.ZodOptional<z.ZodString>> = {};
+  for (let i = 0; i < 100; i += 1) logShape[`harbor_log_entry_for_crossing_${i}`] = z.string().optional();
+  return z.object({ pier: z.string() }).extend(logShape);
+}
+/** PromptEngine's estimate on the stub's model id: four characters a token, as the assembler counts. */
+const engineTokensOf = (text: string) => Math.ceil(text.length / 4);
+/**
+ * What the request `call` carried beside its messages, as the provider received it: the tool schemas and the response
+ * schema's payload, each by PromptEngine's estimate of its JSON, 0 for one the request did not carry.
+ */
+function besideOf(s: ProviderScript, call: number): { tools: number; payload: number } {
+  const options = s.seen[call]?.options ?? {};
+  const tools = options.tools as unknown[] | undefined;
+  const format = options.responseFormat as Record<string, unknown> | undefined;
+  return {
+    tools: Array.isArray(tools) && tools.length > 0 ? engineTokensOf(JSON.stringify(tools)) : 0,
+    payload: format ? engineTokensOf(JSON.stringify(format)) : 0,
+  };
+}
+
+describe("agent({ runtime: 'gmi' }) earlier history beside what a request carries outside its prompt", () => {
+  /**
+   * Twelve earlier messages of 1,200 characters, 300 tokens each: 3,600 tokens, more than the 2,800 tokens an
+   * 8,000-token model's history share holds.
+   */
+  const EARLIER = Array.from({ length: 12 }, (_, i) => {
+    const head = `Earlier crossing log ${i}: `;
+    return { role: i % 2 === 0 ? 'user' : 'assistant', content: head + 'x'.repeat(1_200 - head.length) };
+  });
+
+  it.each([
+    { beside: 'tool schemas', withSchema: false },
+    { beside: "tool schemas and a response schema's payload", withSchema: true },
+  ])("an agent with $beside: the earlier history is kept only where they leave it room, and the request fits the model's context", async ({ withSchema }) => {
+    ids.next = 0;
+    const WINDOW = 8_000;
+    const answer = '{"pier":"Pier 3"}';
+    const turn = withSchema ? { responseSchema: longSchema(), schemaName: 'crossing_report' } : undefined;
+    const k = key(); const emb = key();
+    const s = script('openai', k, { window: WINDOW, replies: [...STATEMENTS.map(() => reply.text('Noted.')), reply.text(answer), reply.text(answer)] });
+    script('openai', emb, { replies: [] });
+    vi.stubEnv('OPENAI_API_KEY', emb);
+    const a = withTool(k, timetableTool(60));
+    try {
+      const session = a.session('s');
+      for (const statement of STATEMENTS) await session.send(statement);
+      // The tool's schema travels beside the prompt of a request with no response schema.
+      expect(besideOf(s, 0).tools, 'the tool schemas of a request').toBeGreaterThan(1_200);
+      // A short question first, to read what the request carries: its system text, and what travels beside its prompt.
+      session.clear();
+      await session.send(QUESTION, turn);
+      const first = besideOf(s, STATEMENTS.length);
+      if (withSchema) expect(first.payload, 'the schema payload of the request').toBeGreaterThan(1_500);
+      expect(first.tools + first.payload, 'what the request carries beside its prompt').toBeGreaterThan(1_200);
+      const systemTokens = engineTokensOf(systemTextOf(s.seen[STATEMENTS.length].messages));
+
+      // A question that brings what nothing reduces (the system text, the question and what travels beside the
+      // prompt) to 4,600 tokens. With the memory block, about 2,000 tokens of the model's context are left for the
+      // earlier history, less than the 2,800 its share would keep.
+      const filler = Array.from({ length: 400 }, (_, i) => `Background paragraph ${i}: the island ferry leaves its pier and the ticket desk opens before each crossing.`).join(' ');
+      const question = `${QUESTION} ${filler}`.slice(0, (4_600 - systemTokens - first.tools - first.payload) * 4);
+      session.clear();
+      session.reseed(EARLIER as never);
+      logged.length = 0;
+      const result = await session.send(question, turn);
+
+      const call = STATEMENTS.length + 1;
+      const request = s.seen[call];
+      expect(request, 'the question reached the model').toBeDefined();
+      const beside = besideOf(s, call);
+      expect(beside).toEqual(first);
+      const block = memoryBlockOf(s, call);
+      expect(tokensOf(block), 'the memory block').toBeGreaterThan(1_000);
+      const kept = request.messages.map(textOf).filter((text) => text.startsWith('Earlier crossing log')).length;
+      // The request the model received fits its context: each text it carries, and what travels beside them, by
+      // PromptEngine's estimate.
+      const texts = request.messages.flatMap(textPartsOf).reduce((sum, text) => sum + engineTokensOf(text), 0);
+      expect(
+        texts + beside.tools + beside.payload,
+        `the request: ${texts} tokens of text (a memory block of ${engineTokensOf(block)}, ${kept} earlier messages of 300), tool schemas of ${beside.tools} and a schema payload of ${beside.payload}`,
+      ).toBeLessThanOrEqual(WINDOW);
+      // Earlier history still reached the model: the newest of it, with the oldest left out and reported.
+      expect(kept).toBeGreaterThan(0);
+      expect(kept).toBeLessThan(EARLIER.length);
+      expect(request.messages.map(textOf).some((text) => text.startsWith('Earlier crossing log 11:'))).toBe(true);
+      expect(result.historyOmitted).toMatchObject({ messages: EARLIER.length - kept });
+      // The block kept its share: the reservation reduces the history, never the block.
+      expect(result.memoryRecall!.budget).toMatchObject({ requested: DEFAULT_RECALL_BUDGET_TOKENS, effective: 1600, clampReason: 'prompt_share', promptShareTokens: 1600 });
+    } finally {
+      await a.close();
+    }
+  });
+});
+
+describe("agent({ runtime: 'gmi' }) memory budget on a response-schema turn of an agent with tools", () => {
+  it("the tool schemas the gateway leaves out of a request with a response schema are not counted against the block: the block is sent, and the request fits the model's context", async () => {
+    ids.next = 0;
+    const WINDOW = 8_000;
+    const schema = z.object({ pier: z.string() });
+    const answer = '{"pier":"Pier 3"}';
+    const k = key(); const emb = key();
+    const s = script('openai', k, { window: WINDOW, replies: [...STATEMENTS.map(() => reply.text('Noted.')), reply.text(answer)] });
+    script('openai', emb, { replies: [] });
+    vi.stubEnv('OPENAI_API_KEY', emb);
+    // About 7,000 tokens of tool schema on the 8,000-token model.
+    const a = withTool(k, timetableTool(300));
+    try {
+      const session = a.session('s');
+      for (const statement of STATEMENTS) await session.send(statement);
+      const toolTokens = besideOf(s, 0).tools;
+      expect(toolTokens, 'the tool schemas of a request with no response schema').toBeGreaterThan(6_800);
+      expect(toolTokens).toBeLessThan(7_400);
+
+      // A question of 1,000 tokens: with the tool schemas it would be over the model's context, and without them it
+      // leaves the block its whole share.
+      const filler = Array.from({ length: 60 }, (_, i) => `Background paragraph ${i}: the island ferry leaves its pier and the ticket desk opens before each crossing.`).join(' ');
+      const question = `${QUESTION} ${filler}`.slice(0, 4_000);
+      session.clear();
+      logged.length = 0;
+      const result = await session.send(question, { responseSchema: schema, schemaName: 'crossing_report' });
+      expect(result.object).toEqual({ pier: 'Pier 3' });
+
+      // The request carries the schema's payload and no tools: `createCompletionGateway` sends a response-schema
+      // request without them.
+      const call = STATEMENTS.length;
+      const request = s.seen[call];
+      expect(request, 'the question reached the model').toBeDefined();
+      const beside = besideOf(s, call);
+      expect(beside.tools, 'the tool schemas of the request with a response schema').toBe(0);
+      expect(beside.payload, 'the schema payload of the request').toBeGreaterThan(0);
+
+      // So the tool schemas are no fixed part of this request, and the block keeps the model's share.
+      const budget = result.memoryRecall!.budget;
+      expect(budget.clampReason, `the block's clamp, with ${budget.fixedPromptTokens} tokens of fixed parts counted beside ${toolTokens} of tool schemas the request does not carry`).toBe('prompt_share');
+      expect(budget).toMatchObject({ requested: DEFAULT_RECALL_BUDGET_TOKENS, effective: 1600, promptShareTokens: 1600, otherContextTokens: 0, hop: 0 });
+      expect(budget.fixedPromptTokens).toBeLessThan(toolTokens);
+      expect(budget.fixedPromptTokens).toBeGreaterThanOrEqual(engineTokensOf(systemTextOf(request.messages)) + engineTokensOf(question) + beside.payload);
+      const block = memoryBlockOf(s, call);
+      expect(tokensOf(block)).toBeGreaterThan(1_000);
+      expect(tokensOf(block)).toBeLessThanOrEqual(budget.effective);
+      const texts = request.messages.flatMap(textPartsOf).reduce((sum, text) => sum + engineTokensOf(text), 0);
+      expect(texts + beside.payload, `the request: ${texts} tokens of text and a schema payload of ${beside.payload}`).toBeLessThanOrEqual(WINDOW);
+    } finally {
+      await a.close();
+    }
+  });
+});
