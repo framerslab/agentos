@@ -629,7 +629,12 @@ const timetableTool = (rows: number) => ({
   parameters: { type: 'object', properties: { pier: { type: 'string' } } },
   execute: async () => ({ ok: true }),
 });
-/** The agent of `withRecall`, with no recall setting and one tool. */
+/**
+ * The agent of `withRecall`, with no recall setting and one tool. The chain-of-thought instruction is off: the
+ * runtime writes it into each call that offers tools in its model-call hook, after the prompt is built, and what a
+ * hook adds is counted by neither the memory block's bound nor the prompt's reservation. With it off, a request
+ * carries the prompt as it was built and what the GMI counted beside it.
+ */
 const withTool = (apiKey: string, timetable: ReturnType<typeof timetableTool>) =>
   agent({
     runtime: 'gmi',
@@ -639,6 +644,7 @@ const withTool = (apiKey: string, timetable: ReturnType<typeof timetableTool>) =
     apiKey,
     fallbackProviders: [],
     tools: { timetable },
+    chainOfThought: false,
     cognition: { memory: { embedding: { provider: 'openai' } }, mechanisms: false },
   } as unknown as AgentOptions);
 /** A response schema of a hundred named fields: OpenAI takes it as a strict `json_schema` payload of about 2,500 tokens. */
