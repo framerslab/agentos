@@ -104,6 +104,48 @@ describe('conversational extraction policy', () => {
     expect(defaults.timeoutMs).toBe(3000);
   });
 
+  it('validates a limit at each level before the runtime level can displace the persona level', () => {
+    // An invalid runtime call cap leaves the persona's valid zero in force: no model.
+    const capped = resolve(
+      { extraction: { maxCallsPerTurn: 1.5 } },
+      { extraction: { maxCallsPerTurn: 0 } },
+    );
+    expect(capped.path).toBe('classical');
+    expect(capped.maxCallsPerTurn).toBe(0);
+
+    // The same for the time allowance.
+    const untimed = resolve(
+      { extraction: { timeoutMs: 0.5 } },
+      { extraction: { timeoutMs: 0 } },
+    );
+    expect(untimed.path).toBe('classical');
+    expect(untimed.timeoutMs).toBe(0);
+
+    // Invalid runtime limits fall through to the persona's valid ones.
+    expect(
+      resolve(
+        { extraction: { maxCallsPerTurn: -1, timeoutMs: Number.NaN } },
+        { extraction: { maxCallsPerTurn: 1, timeoutMs: 750 } },
+      ),
+    ).toMatchObject({ path: 'auto', maxCallsPerTurn: 1, timeoutMs: 750 });
+
+    // A valid runtime limit takes precedence over a valid persona limit.
+    expect(
+      resolve(
+        { extraction: { maxCallsPerTurn: 3, timeoutMs: 500 } },
+        { extraction: { maxCallsPerTurn: 0, timeoutMs: 0 } },
+      ),
+    ).toMatchObject({ path: 'auto', maxCallsPerTurn: 3, timeoutMs: 500 });
+
+    // With no valid limit at either level the defaults apply.
+    expect(
+      resolve(
+        { extraction: { maxCallsPerTurn: 1.5, timeoutMs: -5 } },
+        { extraction: { maxCallsPerTurn: Number.POSITIVE_INFINITY, timeoutMs: 2.5 } },
+      ),
+    ).toMatchObject({ path: 'auto', maxCallsPerTurn: 2, timeoutMs: 3000 });
+  });
+
   it('keeps callbacks out of local-only and vetoed policies', () => {
     const runtime = {
       extraction: { invoker },
