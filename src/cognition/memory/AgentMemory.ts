@@ -213,15 +213,17 @@ export class AgentMemory {
    * @example
    * await memory.remember("User prefers dark mode");
    * await memory.remember("Deploy by Friday", { type: 'prospective', tags: ['deadline'] });
+   *
+   * The `ExtractionCallOptions` fields of `options` (`inputKind`, `turnId`, `role`,
+   * `subjectId`, `extraction`) are reserved for the conversational extraction pipeline
+   * and have no effect in this release: this method does not forward them.
    */
   async remember(
     content: string,
     options?: ExtractionCallOptions & {
-      /** A supplied type marks a record unless the caller affirms conversation. */
       type?: MemoryType;
       scope?: MemoryScope;
       scopeId?: string;
-      /** Curated, document and tool provenance takes precedence over a conversational hint. */
       sourceType?: MemorySourceType;
       tags?: string[];
       entities?: string[];
@@ -314,6 +316,10 @@ export class AgentMemory {
    * @example
    * await memory.observe('user', "Can you help me debug this?");
    * await memory.observe('assistant', "Sure! The issue is in your useEffect...");
+   *
+   * The `ExtractionObservationOptions` fields of `options` (`inputKind`, `turnId`,
+   * `subjectId`, `extraction`, `scope`, `scopeId`) are reserved for the conversational
+   * extraction pipeline and have no effect in this release: this method does not forward them.
    */
   async observe(
     role: ExtractionRole,

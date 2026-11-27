@@ -77,9 +77,11 @@ export type AgencyStrategy =
  */
 export interface MemoryConfig {
   /**
-   * Conversational extraction policy for native memory. Omit to keep legacy
-   * behavior. True or an object selects extraction stages. False vetoes
-   * extraction without disabling the memory store.
+   * Reserved for the conversational extraction pipeline. It has no effect in
+   * this release: the agent's memory is built and behaves the same whatever
+   * value it holds.
+   *
+   * @internal
    */
   extraction?: ExtractionSetting;
 

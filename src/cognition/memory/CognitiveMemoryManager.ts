@@ -131,17 +131,22 @@ export interface MemoryDeletion {
 export interface ICognitiveMemoryManager {
   initialize(config: CognitiveMemoryConfig): Promise<void>;
 
-  /** Encode a new input into a memory trace. Called after each user message. */
+  /**
+   * Encode a new input into a memory trace. Called after each user message.
+   *
+   * The `ExtractionCallOptions` fields of `options` (`inputKind`, `turnId`, `role`,
+   * `subjectId`, `extraction`) are reserved for the conversational extraction pipeline
+   * and have no effect in this release: the manager does not read them, and
+   * `extraction: false` does not keep the input from a configured model callback.
+   */
   encode(
     input: string,
     mood: PADState,
     gmiMood: string,
     options?: ExtractionCallOptions & {
-      /** A supplied type marks a record unless the caller affirms conversation. */
       type?: MemoryType;
       scope?: MemoryScope;
       scopeId?: string;
-      /** Explicit record provenance takes precedence over a conversational hint. */
       sourceType?: MemoryTrace['provenance']['sourceType'];
       contentSentiment?: number;
       tags?: string[];
@@ -192,7 +197,14 @@ export interface ICognitiveMemoryManager {
    */
   reassembleForBudget?(context: AssembledMemoryContext, tokenBudget: number): Promise<AssembledMemoryContext>;
 
-  /** Feed a message to the observer (Batch 2). Returns notes if threshold reached. */
+  /**
+   * Feed a message to the observer (Batch 2). Returns notes if threshold reached.
+   *
+   * The `ExtractionObservationOptions` fields of `options` (`inputKind`, `turnId`,
+   * `subjectId`, `extraction`, `scope`, `scopeId`) are reserved for the conversational
+   * extraction pipeline and have no effect in this release: the manager does not read
+   * them, and `extraction: false` does not keep the message out of the observer's buffer.
+   */
   observe?(
     role: ExtractionRole,
     content: string,
@@ -1497,6 +1509,9 @@ export class CognitiveMemoryManager implements ICognitiveMemoryManager {
    * @param role - Message role (user, assistant, system, tool)
    * @param content - Message text content
    * @param mood - Optional PAD emotional state at observation time
+   * @param options - `contentSentiment` is passed to the traces reflection encodes. The
+   *   `ExtractionObservationOptions` fields are reserved for the conversational extraction
+   *   pipeline and have no effect in this release.
    * @returns Observation notes if threshold was reached, null otherwise
    */
   async observe(

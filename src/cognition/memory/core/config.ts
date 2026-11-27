@@ -237,8 +237,11 @@ export interface ConsolidationConfig {
  */
 export interface CognitiveMemoryPersonaConfig {
   /**
-   * Serializable conversational extraction defaults. Runtime settings take
-   * precedence except that false at either level vetoes extraction.
+   * Reserved for the conversational extraction pipeline. It has no effect in
+   * this release: nothing reads a persona's extraction settings when memory is
+   * built or used.
+   *
+   * @internal
    */
   extraction?: boolean | PersonaExtractionOptions;
 
@@ -311,9 +314,12 @@ export interface CognitiveMemoryPersonaConfig {
 
 export interface CognitiveMemoryConfig {
   /**
-   * Conversational extraction policy. Omit to keep legacy memory behavior.
-   * True or an object selects extraction stages. False opts out even when
-   * legacy callbacks or persona defaults are supplied.
+   * Reserved for the conversational extraction pipeline. It has no effect in
+   * this release: the manager builds the observer, the reflector and the typed
+   * network from `observer`, `reflector` and `typedNetwork` alone, and their
+   * model callbacks run as configured whatever value this holds.
+   *
+   * @internal
    */
   extraction?: ExtractionSetting;
 
@@ -659,9 +665,7 @@ export interface TypedNetworkRuntimeConfig {
    * - `true`: manager calls the observer on every `encode()` with the full input
    *   text and writes facts into the store namespaced by the trace ID.
    *
-   * With explicit conversational extraction, false vetoes the encode trigger
-   * while leaving the enabled typed-network stage available for other uses.
-   * On the legacy path the default is false, to prevent the double-extraction pattern
+   * Default is `false` to prevent the bench-style double-extraction pattern
    * (manager extracts per-encode AND consumer extracts per-session). When in
    * doubt, leave this `false` and let the consumer drive extraction explicitly.
    */

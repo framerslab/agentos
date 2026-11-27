@@ -203,9 +203,11 @@ export interface IngestionConfig {
  */
 export interface MemoryConfig {
   /**
-   * Conversational extraction policy. Omit to keep legacy literal writes.
-   * True or an object selects extraction stages. False opts out of
-   * conversational extraction while keeping ordinary memory writes.
+   * Reserved for the conversational extraction pipeline. It has no effect in
+   * this release: `remember()` stores the text it is given, literally,
+   * whatever value this holds.
+   *
+   * @internal
    */
   extraction?: ExtractionSetting;
 
@@ -322,14 +324,22 @@ export interface MemoryConfig {
 
 /**
  * Options for storing a new memory trace via `Memory.remember()`.
+ *
+ * The inherited `ExtractionCallOptions` fields (`inputKind`, `turnId`, `role`,
+ * `subjectId`, `extraction`) are reserved for the conversational extraction
+ * pipeline and have no effect in this release: `remember()` does not read them.
  */
 export interface RememberOptions extends ExtractionCallOptions {
-  /** Original provenance for deciding whether this write is conversational. */
+  /**
+   * Reserved for the conversational extraction pipeline. It has no effect in
+   * this release: `remember()` does not read it.
+   *
+   * @internal
+   */
   sourceType?: MemorySourceType;
 
   /**
-   * Tulving memory type. A supplied type marks a record unless the caller
-   * affirms conversation and the source is otherwise eligible.
+   * Tulving memory type.
    * @example 'episodic' | 'semantic' | 'procedural' | 'prospective'
    */
   type?: string;

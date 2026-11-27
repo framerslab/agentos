@@ -1,3 +1,17 @@
+/**
+ * @fileoverview Option types and the policy resolver for the conversational
+ * extraction pipeline.
+ *
+ * Reserved: these settings have no effect in this release. `Memory`,
+ * `AgentMemory`, `CognitiveMemoryManager` and the agent memory builder accept
+ * them and ignore them, so memory behaves exactly as it does when they are
+ * omitted. `resolveExtractionPolicy` is a pure function that computes the
+ * policy the pipeline will apply. It calls no model, and no memory entry
+ * point calls it.
+ *
+ * @module agentos/memory/extraction/policy
+ */
+
 import { randomUUID } from 'node:crypto';
 import type {
   CognitiveMemoryConfig,
@@ -12,105 +26,269 @@ import type { ITypedExtractionLLM } from '../retrieval/typed-network/index.js';
 /** Message role supplied by the caller or determined by the serving runtime. */
 export type ExtractionRole = 'user' | 'assistant' | 'system' | 'tool';
 
-/** Extraction defaults that can be stored in a persona definition. */
+/**
+ * Extraction settings a persona definition can hold, as {@link resolveExtractionPolicy} reads them.
+ *
+ * Reserved for the conversational extraction pipeline. It has no effect in this release.
+ *
+ * @internal
+ */
 export interface PersonaExtractionOptions {
-  /** Auto can use an authorized model. Classical uses local extraction and reflection. */
+  /**
+   * Resolver input: `'classical'` resolves to a policy that carries no model callback,
+   * `'auto'` to one that can carry one.
+   *
+   * Reserved for the conversational extraction pipeline. It has no effect in this release.
+   *
+   * @internal
+   */
   mode?: 'auto' | 'classical';
-  /** Set to false to disable typed claims and bank writes while allowing observation notes. */
+  /**
+   * Resolver input: `false` resolves the typed-network stage, its encode trigger and its bank writes to off.
+   *
+   * Reserved for the conversational extraction pipeline. It has no effect in this release.
+   *
+   * @internal
+   */
   typedNetwork?: boolean;
-  /** Observation tuning or false to disable notes and their handoff to reflection. */
+  /**
+   * Resolver input: observation thresholds and model ID, or `false`, which resolves the
+   * observation stage and its handoff to reflection to off.
+   *
+   * Reserved for the conversational extraction pipeline. It has no effect in this release.
+   *
+   * @internal
+   */
   observer?: boolean | Omit<Partial<ObserverConfig>, 'llmInvoker'>;
-  /** Reflection tuning or false to disable automatic reflection and its pending queue. */
+  /**
+   * Resolver input: reflection thresholds and model ID, or `false`, which resolves the
+   * reflection stage to off.
+   *
+   * Reserved for the conversational extraction pipeline. It has no effect in this release.
+   *
+   * @internal
+   */
   reflector?: boolean | Omit<Partial<ReflectorConfig>, 'llmInvoker'>;
-  /** Model calls allowed across extraction and reflection for one turn. Default 2. */
+  /**
+   * Resolver input: model calls allowed for one turn. A non-negative integer; any other
+   * value is ignored. The resolved default is 2.
+   *
+   * Reserved for the conversational extraction pipeline. It has no effect in this release.
+   *
+   * @internal
+   */
   maxCallsPerTurn?: number;
-  /** Total model time allowed in milliseconds for one turn. Default 3,000. */
+  /**
+   * Resolver input: total model time for one turn in milliseconds. A non-negative integer;
+   * any other value is ignored. The resolved default is 3,000.
+   *
+   * Reserved for the conversational extraction pipeline. It has no effect in this release.
+   *
+   * @internal
+   */
   timeoutMs?: number;
 }
 
-/** Runtime extraction options. Stage tuning takes precedence over legacy tuning for that stage. */
+/**
+ * Runtime extraction settings, as {@link resolveExtractionPolicy} reads them. A stage's
+ * tuning here takes precedence over the same stage's tuning elsewhere in the configuration.
+ *
+ * Reserved for the conversational extraction pipeline. It has no effect in this release.
+ *
+ * @internal
+ */
 export interface ExtractionOptions extends PersonaExtractionOptions {
-  /** Shared model callback for enabled stages without a stage-specific callback. */
+  /**
+   * Resolver input: a model callback the resolved policy carries when a stage is enabled
+   * and a model is allowed.
+   *
+   * Reserved for the conversational extraction pipeline. It has no effect in this release:
+   * nothing calls it.
+   *
+   * @internal
+   */
   invoker?: ITypedExtractionLLM;
-  /** Observation tuning and optional runtime callback, or false to disable observation. */
+  /**
+   * Resolver input: observation tuning with an optional callback, or `false`.
+   *
+   * Reserved for the conversational extraction pipeline. It has no effect in this release.
+   *
+   * @internal
+   */
   observer?: boolean | Partial<ObserverConfig>;
-  /** Reflection tuning and optional runtime callback, or false to disable automatic reflection. */
+  /**
+   * Resolver input: reflection tuning with an optional callback, or `false`.
+   *
+   * Reserved for the conversational extraction pipeline. It has no effect in this release.
+   *
+   * @internal
+   */
   reflector?: boolean | Partial<ReflectorConfig>;
 }
 
-/** True or an object selects conversational extraction. False is an enclosing opt-out. */
+/**
+ * Value of the `extraction` setting on the memory configuration types.
+ * {@link resolveExtractionPolicy} maps `false` to the `off` path and `true` or an object
+ * to the `auto` or `classical` path.
+ *
+ * Reserved for the conversational extraction pipeline. It has no effect in this release:
+ * memory behaves the same whatever value it holds.
+ *
+ * @internal
+ */
 export type ExtractionSetting = boolean | ExtractionOptions;
 
-/** Per-source extraction hints on a native memory call. */
+/**
+ * Per-source fields on a native memory call, as {@link resolveExtractionPolicy} reads them.
+ *
+ * Reserved for the conversational extraction pipeline. They have no effect in this release:
+ * the memory entry points accept them and ignore them.
+ *
+ * @internal
+ */
 export interface ExtractionCallOptions {
   /**
-   * Affirm a conversation even when giving a trace type, or mark the input as a literal record.
-   * An explicit record source or a preassigned trace ID takes precedence. Tags only describe the trace.
+   * Resolver input: `'conversation'` affirms a conversational source even when the call
+   * gives a trace type, and `'record'` marks a literal record. A record source type or a
+   * preassigned trace ID resolves as a record either way.
+   *
+   * Reserved for the conversational extraction pipeline. It has no effect in this release.
+   *
+   * @internal
    */
   inputKind?: 'conversation' | 'record';
-  /** Opaque source ID for paired calls. A dedicated instance assigns a fresh ID to a bare turn. */
+  /**
+   * Opaque source ID shared by the calls that file one turn.
+   *
+   * Reserved for the conversational extraction pipeline. It has no effect in this release.
+   *
+   * @internal
+   */
   turnId?: string;
-  /** Actual message role on a write call. The observe operation takes the role as its first argument. */
+  /**
+   * Resolver input: the message's role on a write call. The observe operation takes the
+   * role as its first argument.
+   *
+   * Reserved for the conversational extraction pipeline. It has no effect in this release.
+   *
+   * @internal
+   */
   role?: ExtractionRole;
-  /** Subject attribution. Shared runtimes derive it from the guarded turn. */
+  /**
+   * The subject a source is attributed to.
+   *
+   * Reserved for the conversational extraction pipeline. It has no effect in this release.
+   *
+   * @internal
+   */
   subjectId?: string;
-  /** Skip conversational extraction for this source. The ordinary write receipt is preserved. */
+  /**
+   * Resolver input: `false` resolves this source to the `off` path.
+   *
+   * Reserved for the conversational extraction pipeline. It has no effect in this release:
+   * a call that passes `false` is processed exactly as a call that omits it, model
+   * callbacks included.
+   *
+   * @internal
+   */
   extraction?: false;
 }
 
-/** Source and filing options shared by native observation entry points. */
+/**
+ * Source and filing fields on the native observation entry points.
+ *
+ * Reserved for the conversational extraction pipeline. They have no effect in this release:
+ * the observation entry points accept them and ignore them.
+ *
+ * @internal
+ */
 export interface ExtractionObservationOptions extends Omit<ExtractionCallOptions, 'role'> {
-  /** Visibility of the source. An omitted scope uses the instance's filing context. */
+  /**
+   * Visibility of the observed source.
+   *
+   * Reserved for the conversational extraction pipeline. It has no effect in this release.
+   *
+   * @internal
+   */
   scope?: MemoryScope;
-  /** Identifier of the filing scope. */
+  /**
+   * Identifier of the observed source's filing scope.
+   *
+   * Reserved for the conversational extraction pipeline. It has no effect in this release.
+   *
+   * @internal
+   */
   scopeId?: string;
 }
 
-/** Original write options, before a wrapper fills in type or source defaults. */
+/**
+ * A caller's original write options, as {@link resolveExtractionPolicy} classifies them.
+ *
+ * Reserved for the conversational extraction pipeline. It has no effect in this release.
+ *
+ * @internal
+ */
 export interface ExtractionIntent extends ExtractionCallOptions {
-  /** A caller-supplied type identifies a record unless the caller affirms conversation. */
+  /** A caller-supplied type resolves as a record unless `inputKind` is `'conversation'`. */
   type?: string;
-  /** Explicit curated, imported, document and tool provenance always identifies a record. */
+  /** Curated, imported, document and tool provenance resolves as a record. */
   sourceType?: MemorySourceType;
-  /** A preassigned trace ID identifies a record such as a ledger write. */
+  /** A preassigned trace ID resolves as a record, such as a ledger write. */
   id?: string;
-  /** A restored timestamp identifies a historical record. */
+  /** A restored timestamp resolves as a historical record. */
   createdAt?: number;
-  /** Descriptive trace tags have no effect on eligibility. */
+  /** Descriptive trace tags. The resolver does not read them. */
   tags?: readonly string[];
 }
 
-/** Host decisions established before a source reaches the extractor. */
+/**
+ * A host's decisions about one source, as {@link resolveExtractionPolicy} reads them.
+ *
+ * Reserved for the conversational extraction pipeline. It has no effect in this release.
+ *
+ * @internal
+ */
 export interface ExtractionHostPolicy {
-  /** Off and raw both veto extraction. Compiled permits eligible local derivatives. */
+  /** `'off'` and `'raw'` resolve to the `off` path. `'compiled'` leaves the other settings to decide. */
   mode?: 'off' | 'raw' | 'compiled';
-  /** False keeps eligible extraction local. */
+  /** `false` resolves to a policy that carries no model callback. */
   allowExternalProcessing?: boolean;
-  /** A forgotten subject cannot produce derivatives. */
+  /** `true` resolves to the `off` path. */
   forgotten?: boolean;
 }
 
-/** The settings available to the conversational extraction stages. */
+/**
+ * The value {@link resolveExtractionPolicy} returns: a path, stage settings and limits.
+ *
+ * Reserved for the conversational extraction pipeline. It has no effect in this release:
+ * no memory entry point reads a resolved policy.
+ *
+ * @internal
+ */
 export interface ResolvedExtractionPolicy {
-  /** Legacy delegates to the existing memory behavior. Off skips conversational extraction. */
+  /**
+   * `legacy` is the result when no level sets `extraction`. `off` is the result when a
+   * level or the host turns extraction off, or the source is a record. `classical` carries
+   * no model callback and `auto` can carry one.
+   */
   path: 'legacy' | 'off' | 'classical' | 'auto';
-  /** Typed-network settings or false when the stage is disabled. */
+  /** Typed-network settings, or `false` when the stage resolves to off. */
   typedNetwork: false | TypedNetworkRuntimeConfig;
-  /** Whether remember and encode can extract typed claims. */
+  /** Whether the typed-network stage's encode trigger resolves to on. */
   extractAtEncode: boolean;
-  /** Whether the extraction result can write typed-network banks. */
+  /** Whether typed-network bank writes resolve to on. */
   bankWrites: boolean;
-  /** Observer settings or false when observation is disabled. */
+  /** Observer settings, or `false` when observation resolves to off. */
   observer: false | Partial<ObserverConfig>;
-  /** Reflector settings or false when automatic reflection is disabled. */
+  /** Reflector settings, or `false` when reflection resolves to off. */
   reflector: false | Partial<ReflectorConfig>;
-  /** Whether accepted observation notes can enter the automatic reflection queue. */
+  /** Whether observation notes can enter the reflection queue under this policy. */
   reflectionHandoff: boolean;
-  /** Shared model callback, available only to an eligible automatic stage. */
+  /** Shared model callback, present only on the `auto` path with a stage enabled. */
   invoker?: ITypedExtractionLLM;
-  /** Effective model call allowance for the turn. */
+  /** Model calls allowed for the turn. 0 off the `auto` path. */
   maxCallsPerTurn: number;
-  /** Effective model time allowance in milliseconds for the turn. */
+  /** Model time allowed for the turn in milliseconds. 0 off the `auto` path. */
   timeoutMs: number;
 }
 
@@ -170,8 +348,20 @@ function modelLimit(value: number | undefined, fallback: number): number {
 }
 
 /**
- * Resolve conversational extraction for one source. Host and enclosing vetoes
- * take precedence. Supply the caller's options before filling in filing defaults.
+ * Compute the extraction policy for one source from the runtime settings, the persona
+ * settings, the caller's original write options and the host's decisions.
+ *
+ * A host mode of `off` or `raw`, a forgotten subject, or `false` at the runtime, persona
+ * or call level returns the `off` policy. With `extraction` set at no level the result
+ * is the `legacy` path. Otherwise a record source returns `off`, and a conversational
+ * source returns `auto` or `classical` with the runtime's stage settings ahead of the
+ * persona's. Pass the caller's options as given, before a wrapper fills in a type or a
+ * source type.
+ *
+ * Reserved for the conversational extraction pipeline. It has no effect in this release:
+ * it is a pure function, it calls no model, and no memory entry point calls it.
+ *
+ * @internal
  */
 export function resolveExtractionPolicy(
   runtime: RuntimeConfig = {},
@@ -202,7 +392,7 @@ export function resolveExtractionPolicy(
   }
 
   if (runtime.extraction === undefined && persona.extraction === undefined) {
-    // A local-only host must also prevent a configured legacy model from receiving this source.
+    // A local-only host resolves to off here: the legacy path carries no local-only variant.
     return host.allowExternalProcessing === false ? disabled : { ...disabled, path: 'legacy' };
   }
   if (!isConversation(call)) return disabled;
