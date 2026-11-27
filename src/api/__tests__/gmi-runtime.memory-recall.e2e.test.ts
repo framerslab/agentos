@@ -338,6 +338,21 @@ describe.each(ENGINES)("agent({ runtime: 'gmi' }) memory.recall over a durable s
     }
   });
 
+  it("with no recall setting the turn's record reads the frozen defaults", async () => {
+    const db = await open();
+    try {
+      const out = await askAfterRestart(db, undefined, 'What is the bike shed code?');
+      expect(out.block).toContain(GOLD);
+      const record = out.memoryRecall!;
+      expect(record).toBeDefined();
+      expect(record.retrieval).toBe('dense');
+      expect(record.reranker.provider).toBe('none');
+      expect(record.budget.requested).toBe(6400);
+    } finally {
+      await db.close();
+    }
+  });
+
   it('hybrid makes no more embedding requests in a turn than dense', async () => {
     const a = await open();
     const b = await open();
