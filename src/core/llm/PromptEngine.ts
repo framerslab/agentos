@@ -235,6 +235,18 @@ function reservedTokensOf(components: Readonly<PromptComponents>): number {
 }
 
 /**
+ * Whether the template a prompt is built with sends an assistant message's tool calls. The Anthropic template sends
+ * an assistant message's content alone, and the generic template writes each message as its role and content, so
+ * neither sends the calls, and the history's count leaves their arguments out there. Every other template (the
+ * OpenAI chat template, and a host's own) is taken to send them.
+ *
+ * @param templateName - The template the prompt is built with.
+ */
+function toolCallsSentBy(templateName: string | undefined): boolean {
+  return templateName !== 'anthropic_messages' && templateName !== 'generic_completion';
+}
+
+/**
  * The newest user message's content with the note in front of it. The person's words are never changed: no label
  * goes in front of them and nothing is trimmed.
  *
@@ -477,7 +489,8 @@ export class PromptEngine implements IPromptEngine {
       const { optimizedComponents, modifications, contextTokens } = await this.applyTokenBudget(
         augmentedComponents,
         modelTargetInfo,
-        result.issues || []
+        result.issues || [],
+        result.metadata.templateUsed,
       );
       result.wasTruncatedOrSummarized = modifications.wasModified;
       result.modificationDetails = modifications.details;
@@ -679,7 +692,12 @@ export class PromptEngine implements IPromptEngine {
       memoryContextText: undefined,
       retrievedContext: undefined,
     };
-    const partsTokens = await this.calculateTotalTokens(fixed, modelTargetInfo.modelId, this.thinkingSentFor(history, modelTargetInfo));
+    const partsTokens = await this.calculateTotalTokens(
+      fixed,
+      modelTargetInfo.modelId,
+      this.thinkingSentFor(history, modelTargetInfo),
+      toolCallsSentBy(modelTargetInfo.promptFormatType || this.config.defaultTemplateName),
+    );
     const hostNote = hostNoteOf(components);
     const noteBesideBlock = hostNote
       ? hostNoteAsSent(hostNote, { ...components, memoryContextText: components.memoryContextText || ' ' })
@@ -754,7 +772,7 @@ export class PromptEngine implements IPromptEngine {
     let estimatedTokens = 0;
     if (components.systemPrompts) estimatedTokens += (await Promise.all(components.systemPrompts.map(sp => this.estimateTokenCount(sp.content, modelTargetInfo.modelId)))).reduce((a,b) => a+b, 0);
     if (components.userInput) estimatedTokens += await this.estimateTokenCount(components.userInput, modelTargetInfo.modelId);
-    if (components.conversationHistory) estimatedTokens += await this.calculateTokensForMessages(components.conversationHistory, modelTargetInfo.modelId, this.thinkingSentFor(components.conversationHistory, modelTargetInfo));
+    if (components.conversationHistory) estimatedTokens += await this.calculateTokensForMessages(components.conversationHistory, modelTargetInfo.modelId, this.thinkingSentFor(components.conversationHistory, modelTargetInfo), toolCallsSentBy(modelTargetInfo.promptFormatType || this.config.defaultTemplateName));
     // The host's note counts as it is sent, as the budget step counts it.
     const hostNote = hostNoteOf(components);
     if (hostNote) estimatedTokens += await this.estimateTokenCount(hostNoteAsSent(hostNote, components), modelTargetInfo.modelId);
@@ -1131,7 +1149,8 @@ export class PromptEngine implements IPromptEngine {
   private async applyTokenBudget(
     components: PromptComponents,
     modelInfo: Readonly<ModelTargetInfo>,
-    issues: PromptEngineResult['issues']
+    issues: PromptEngineResult['issues'],
+    templateName?: string,
   ): Promise<{
     optimizedComponents: PromptComponents;
     modifications: { wasModified: boolean; details: PromptEngineResult['modificationDetails'] };
@@ -1170,7 +1189,8 @@ export class PromptEngine implements IPromptEngine {
     const reservedTokens = reservedTokensOf(optimized);
     const promptBudget = await this.promptBudgetOf(optimized, modelInfo);
     const sendsThinking = this.thinkingSentFor(optimized.conversationHistory, modelInfo);
-    let currentTokens = await this.calculateTotalTokens(optimized, modelInfo.modelId, sendsThinking);
+    const sendsToolCalls = toolCallsSentBy(templateName ?? modelInfo.promptFormatType ?? this.config.defaultTemplateName);
+    let currentTokens = await this.calculateTotalTokens(optimized, modelInfo.modelId, sendsThinking, sendsToolCalls);
     modifications.details!.originalEstimatedTokenCount = currentTokens;
 
     const budgets = {
@@ -1182,7 +1202,7 @@ export class PromptEngine implements IPromptEngine {
     };
 
     if (optimized.conversationHistory && optimized.conversationHistory.length > 0) {
-      const historyTokens = await this.calculateTokensForMessages(optimized.conversationHistory, modelInfo.modelId, sendsThinking);
+      const historyTokens = await this.calculateTokensForMessages(optimized.conversationHistory, modelInfo.modelId, sendsThinking, sendsToolCalls);
       if (historyTokens > budgets.history || currentTokens > promptBudget) {
         // The turn being answered stays whole: summarizing or truncating it
         // would drop the request itself (a structured user message has no
@@ -1194,7 +1214,7 @@ export class PromptEngine implements IPromptEngine {
         const turnStart = this.turnStartOf(history, optimized.currentTurnMessageCount);
         const turnMessages = history.slice(turnStart);
         const earlier = history.slice(0, turnStart);
-        const turnTokens = await this.calculateTokensForMessages(turnMessages, modelInfo.modelId, sendsThinking);
+        const turnTokens = await this.calculateTokensForMessages(turnMessages, modelInfo.modelId, sendsThinking, sendsToolCalls);
         const earlierTokens = historyTokens - turnTokens;
         // The earlier history keeps its share of the history budget, and no
         // more than fits beside everything else in the prompt.
@@ -1227,12 +1247,12 @@ export class PromptEngine implements IPromptEngine {
               modifications.wasModified = true;
             } catch (e) {
               issues?.push({type: 'warning', code: 'HISTORY_SUMMARIZATION_FAILED', message: `History summarization failed: ${e instanceof Error ? e.message : String(e)}`});
-              reducedEarlier = await this.truncateMessages([...earlier], earlierTarget, modelInfo.modelId, minEarlierKept, sendsThinking);
+              reducedEarlier = await this.truncateMessages([...earlier], earlierTarget, modelInfo.modelId, minEarlierKept, sendsThinking, sendsToolCalls);
               modifications.details!.truncatedComponents!.push('conversationHistory');
               modifications.wasModified = true;
             }
           } else {
-            reducedEarlier = await this.truncateMessages([...earlier], earlierTarget, modelInfo.modelId, minEarlierKept, sendsThinking);
+            reducedEarlier = await this.truncateMessages([...earlier], earlierTarget, modelInfo.modelId, minEarlierKept, sendsThinking, sendsToolCalls);
             if (reducedEarlier.length < earlier.length) {
               modifications.details!.truncatedComponents!.push('conversationHistory');
               modifications.wasModified = true;
@@ -1240,7 +1260,7 @@ export class PromptEngine implements IPromptEngine {
           }
         }
         optimized.conversationHistory = [...reducedEarlier, ...turnMessages];
-        const newEarlierTokens = await this.calculateTokensForMessages(reducedEarlier, modelInfo.modelId, sendsThinking);
+        const newEarlierTokens = await this.calculateTokensForMessages(reducedEarlier, modelInfo.modelId, sendsThinking, sendsToolCalls);
         currentTokens = currentTokens - earlierTokens + newEarlierTokens;
         // Truncation keeps the newest messages, so what it dropped is the
         // oldest `dropped` of them; the report counts them as the budget did.
@@ -1248,7 +1268,7 @@ export class PromptEngine implements IPromptEngine {
         if (dropped > 0) {
           modifications.details!.historyOmitted = {
             messages: dropped,
-            tokens: await this.calculateTokensForMessages(earlier.slice(0, dropped), modelInfo.modelId, sendsThinking),
+            tokens: await this.calculateTokensForMessages(earlier.slice(0, dropped), modelInfo.modelId, sendsThinking, sendsToolCalls),
           };
         }
       }
@@ -1344,6 +1364,7 @@ export class PromptEngine implements IPromptEngine {
     components: PromptComponents,
     modelId: string,
     sendsThinking: (msg: Message) => boolean = () => false,
+    sendsToolCalls = true,
   ): Promise<number> {
     let total = 0;
     if(components.systemPrompts) total += (await Promise.all(components.systemPrompts.map(sp => this.estimateTokenCount(sp.content, modelId)))).reduce((a,b) => a+b, 0);
@@ -1353,7 +1374,7 @@ export class PromptEngine implements IPromptEngine {
     const hostNote = hostNoteOf(components);
     if (hostNote) total += await this.estimateTokenCount(hostNoteAsSent(hostNote, components), modelId);
     if(components.memoryContextText) total += await this.estimateTokenCount(memoryTextAsSent(components.memoryContextText, components.retrievedContext), modelId);
-    if(components.conversationHistory) total += await this.calculateTokensForMessages(components.conversationHistory, modelId, sendsThinking);
+    if(components.conversationHistory) total += await this.calculateTokensForMessages(components.conversationHistory, modelId, sendsThinking, sendsToolCalls);
     if(components.retrievedContext) {
       const contextStr = typeof components.retrievedContext === 'string' ? components.retrievedContext : components.retrievedContext.map(r => r.content).join('\n');
       total += await this.estimateTokenCount(contextStr, modelId);
@@ -1398,6 +1419,7 @@ export class PromptEngine implements IPromptEngine {
     messages: Message[],
     modelId: string,
     sendsThinking: (msg: Message) => boolean = () => false,
+    sendsToolCalls = true,
   ): Promise<number> {
     if (!messages) return 0;
     let sum = 0;
@@ -1420,8 +1442,9 @@ export class PromptEngine implements IPromptEngine {
         // This case should not be common if msg.content is Array for multi-part, but as a fallback:
         sum += await this.estimateTokenCount(JSON.stringify(msg.content), modelId);
       }
-      // An assistant message's tool calls are sent with it, their arguments included, in the form the templates write.
-      if (msg.tool_calls && msg.tool_calls.length > 0) {
+      // An assistant message's tool calls are sent with it, their arguments included, in the form the chat template
+      // writes them, where the template sends them (toolCallsSentBy).
+      if (sendsToolCalls && msg.tool_calls && msg.tool_calls.length > 0) {
         sum += await this.estimateTokenCount(JSON.stringify(this.normalizeToolCalls(msg.tool_calls)), modelId);
       }
       // Thinking the target receives with the message is input too.
@@ -1454,9 +1477,10 @@ export class PromptEngine implements IPromptEngine {
     modelId: string,
     minKept = 1,
     sendsThinking: (msg: Message) => boolean = () => false,
+    sendsToolCalls = true,
   ): Promise<Message[]> {
     const tokens: number[] = [];
-    for (const msg of messages) tokens.push(await this.calculateTokensForMessages([msg], modelId, sendsThinking));
+    for (const msg of messages) tokens.push(await this.calculateTokensForMessages([msg], modelId, sendsThinking, sendsToolCalls));
     let currentTokens = tokens.reduce((sum, count) => sum + count, 0);
     const rounds = toolRoundBounds(messages);
     // `first` is always the first message of a tool round or a message outside every round.
