@@ -31,6 +31,8 @@ const key = () => `k-memory-budget-${++n}`;
 
 /** Starts every memory block (the assembler's preamble). */
 const PREAMBLE_HEADING = '## How To Use Your Memories';
+/** The line a response schema's instruction gives the schema under, when the request's system text carries it. */
+const SCHEMA_LINE = 'The JSON MUST conform to this JSON Schema:';
 
 function textOf(message: ChatMessage): string {
   const content = message.content as unknown;
@@ -484,14 +486,10 @@ describe("agent({ runtime: 'gmi' }) memory budget beside a response schema the p
     // PromptEngine's estimate on a Claude model id: 4.2 characters a token.
     const engineTokensOf = (text: string) => Math.ceil(text.length / 4.2);
     // Claude Sonnet 5.5 takes a schema with a record in no payload, so the request carries it in a system message of
-    // its own, written after PromptEngine built the prompt. Long field descriptions make that message a long one.
-    const about = (what: string) => Array.from({ length: 30 }, () => what).join(' ');
-    const schema = z.object({
-      pier: z.string().describe(about('The pier the island ferry leaves from, as the harbor office posts it.')),
-      crossings: z.record(z.string(), z.number()).describe(about('How many crossings the island ferry makes in each part of the day.')),
-      desk: z.string().optional().describe(about('Where the ticket desk for that pier stands and when it opens.')),
-      note: z.string().optional().describe(about('Anything the harbor office added to its log for the day.')),
-    });
+    // its own, written after PromptEngine built the prompt. A hundred named fields make that message a long one.
+    const logShape: Record<string, z.ZodOptional<z.ZodString>> = {};
+    for (let i = 0; i < 100; i += 1) logShape[`harbor_log_entry_for_crossing_${i}`] = z.string().optional();
+    const schema = z.object({ pier: z.string(), crossings: z.record(z.string(), z.number()) }).extend(logShape);
     const answer = '{"pier":"Pier 3","crossings":{"morning":2}}';
     const k = key(); const emb = key();
     const s = script('anthropic', k, { window: WINDOW, replies: [...STATEMENTS.map(() => reply.text('Noted.')), reply.text(answer), reply.text(answer)] });
@@ -512,8 +510,11 @@ describe("agent({ runtime: 'gmi' }) memory budget beside a response schema the p
       // A short question first, to read how many tokens the system text takes with the schema's instruction in it.
       session.clear();
       await session.send(QUESTION, { responseSchema: schema, schemaName: 'crossing_report' });
-      const systemTokens = engineTokensOf(systemTextOf(s.seen[STATEMENTS.length].messages));
-      expect(systemTokens).toBeGreaterThan(500);
+      const systemText = systemTextOf(s.seen[STATEMENTS.length].messages);
+      expect(systemText).toContain(SCHEMA_LINE);
+      expect(systemText).toContain('harbor_log_entry_for_crossing_99');
+      const systemTokens = engineTokensOf(systemText);
+      expect(systemTokens, 'the system text with the schema instruction').toBeGreaterThan(1_000);
       expect(systemTokens).toBeLessThan(WINDOW - 2_000);
 
       // A question that, with that system text, leaves about 600 tokens of the model's context: less than the 1,600
@@ -528,7 +529,7 @@ describe("agent({ runtime: 'gmi' }) memory budget beside a response schema the p
       // The request the model received fits its context, by PromptEngine's estimate of each text it carries.
       const request = s.seen[STATEMENTS.length + 1];
       expect(request, 'the question reached the model').toBeDefined();
-      expect(systemTextOf(request.messages)).toContain('as the harbor office posts it.');
+      expect(systemTextOf(request.messages)).toContain('harbor_log_entry_for_crossing_99');
       const block = memoryBlockOf(s, STATEMENTS.length + 1);
       const sent = request.messages.flatMap(textPartsOf).reduce((sum, text) => sum + engineTokensOf(text), 0);
       expect(sent, `the request, its memory block ${engineTokensOf(block)} tokens`).toBeLessThanOrEqual(WINDOW);
