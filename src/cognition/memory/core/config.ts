@@ -650,12 +650,8 @@ export interface TypedNetworkRuntimeConfig {
    * - `'full'`: minimal + spreading activation + 4-way RRF at retrieve.
    */
   variant: 'minimal' | 'full';
-  /**
-   * LLM adapter for the legacy manual extraction call. Required on the
-   * legacy path. The conversational extraction policy supports local stages
-   * and can resolve a model independently.
-   */
-  observerLLM?: import('../retrieval/typed-network/index.js').ITypedExtractionLLM;
+  /** LLM adapter for the 6-step extraction call. */
+  observerLLM: import('../retrieval/typed-network/index.js').ITypedExtractionLLM;
   /**
    * Whether `encode()` invokes the typed-network observer per call.
    *

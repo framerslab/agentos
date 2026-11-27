@@ -445,6 +445,7 @@ export type {
   ExtractionRole,
   ExtractionSetting,
   PersonaExtractionOptions,
+  PolicyTypedNetworkConfig,
   ResolvedExtractionPolicy,
 } from './extraction/policy.js';
 

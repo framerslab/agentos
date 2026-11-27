@@ -258,6 +258,20 @@ export interface ExtractionHostPolicy {
 }
 
 /**
+ * Typed-network settings as {@link resolveExtractionPolicy} reads and returns them. The
+ * model callback is optional here: the resolver accepts a typed network that names none
+ * and returns one without it when the policy allows no model. The memory configuration's
+ * own `typedNetwork` field keeps the callback required.
+ *
+ * Reserved for the conversational extraction pipeline. It has no effect in this release.
+ *
+ * @internal
+ */
+export type PolicyTypedNetworkConfig = Omit<TypedNetworkRuntimeConfig, 'observerLLM'> & {
+  observerLLM?: ITypedExtractionLLM;
+};
+
+/**
  * The value {@link resolveExtractionPolicy} returns: a path, stage settings and limits.
  *
  * Reserved for the conversational extraction pipeline. It has no effect in this release:
@@ -273,7 +287,7 @@ export interface ResolvedExtractionPolicy {
    */
   path: 'legacy' | 'off' | 'classical' | 'auto';
   /** Typed-network settings, or `false` when the stage resolves to off. */
-  typedNetwork: false | TypedNetworkRuntimeConfig;
+  typedNetwork: false | PolicyTypedNetworkConfig;
   /** Whether the typed-network stage's encode trigger resolves to on. */
   extractAtEncode: boolean;
   /** Whether typed-network bank writes resolve to on. */
@@ -314,7 +328,9 @@ export interface ScreenedTurn {
   }>;
 }
 
-type RuntimeConfig = Pick<CognitiveMemoryConfig, 'extraction' | 'observer' | 'reflector' | 'typedNetwork'>;
+type RuntimeConfig = Pick<CognitiveMemoryConfig, 'extraction' | 'observer' | 'reflector'> & {
+  typedNetwork?: PolicyTypedNetworkConfig;
+};
 type PersonaConfig = Pick<CognitiveMemoryPersonaConfig, 'extraction' | 'observer' | 'reflector'>;
 
 /** @internal Reuse a paired source ID or allocate one for a dedicated bare call. */
@@ -354,10 +370,12 @@ function validLimit(value: number | undefined): number | undefined {
  *
  * A host mode of `off` or `raw`, a forgotten subject, or `false` at the runtime, persona
  * or call level returns the `off` policy. With `extraction` set at no level the result
- * is the `legacy` path. Otherwise a record source returns `off`, and a conversational
- * source returns `auto` or `classical` with the runtime's stage settings ahead of the
- * persona's. Pass the caller's options as given, before a wrapper fills in a type or a
- * source type.
+ * is the `legacy` path, or `off` when the host allows no external processing. Otherwise
+ * a record source returns `off`, and a conversational source returns `auto` or
+ * `classical` with the runtime's stage settings ahead of the persona's. A limit
+ * (`maxCallsPerTurn`, `timeoutMs`) is validated at each level before the levels are
+ * compared, and a limit of zero resolves to `classical`. Pass the caller's options as
+ * given, before a wrapper fills in a type or a source type.
  *
  * Reserved for the conversational extraction pipeline. It has no effect in this release:
  * it is a pure function, it calls no model, and no memory entry point calls it.
