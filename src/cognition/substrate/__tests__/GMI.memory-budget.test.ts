@@ -11,12 +11,15 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 import { createAgentCognitiveMemory, type AgentCognitiveMemory } from '../../../api/runtime/agentCognitiveMemory';
 import type { AIModelProviderManager } from '../../../core/llm/providers/AIModelProviderManager';
-import type { IProvider } from '../../../core/llm/providers/IProvider';
+import type { ChatMessage, IProvider } from '../../../core/llm/providers/IProvider';
 import type { MemoryRecallCapture } from '../../memory/retrieval/recall/capture';
 import { PromptEngine } from '../../../core/llm/PromptEngine';
 import type { IPromptEngine, ModelTargetInfo, PromptComponents, PromptExecutionContext } from '../../../core/llm/IPromptEngine';
 import type { IToolOrchestrator, ToolDefinitionForLLM } from '../../../core/tools/IToolOrchestrator';
-import { toolFormatFor, type CompletionGateway, type CompletionOutcome, type CompletionResolution } from '../../../api/runtime/completionGateway';
+import { createCompletionGateway, toolFormatFor, type CompletionGateway, type CompletionOutcome, type CompletionResolution } from '../../../api/runtime/completionGateway';
+import { responseFormatCarriesSchema } from '../../../api/runtime/responseFormatForProvider';
+import { AnthropicProvider } from '../../../core/llm/providers/implementations/AnthropicProvider';
+import { GeminiProvider } from '../../../core/llm/providers/implementations/GeminiProvider';
 import { createScriptedGmi, promptEngineConfig, runTurn, scriptedProvider, textReply, textTurn } from './helpers/scriptedGmi';
 
 const DIM = 64;
@@ -432,5 +435,138 @@ describe('GMI memory block beside the response format and passthrough parameters
     const built = construct.mock.calls[0][0] as PromptComponents & { reservedTokens?: number };
     // Counted once: the turn's tools and format are not sent beside the passthrough parameters that replace them.
     expect(built.reservedTokens).toBe(tokensOf(JSON.stringify(customModelParams)));
+  });
+});
+
+/**
+ * A completion gateway with one hop on `providerId`'s model `modelId`, whose schema answers are the default gateway's
+ * (`createCompletionGateway`): it lowers a turn's response schema for that hop, and sends a response-schema request
+ * the lowered payload and no tools, as the default gateway's `stream()` does. It answers every request with `answer`
+ * and records the messages and the options of each request as the hop's provider is given them.
+ */
+function servingGateway(providerId: string, modelId: string, window: number, answer: string) {
+  const real = createCompletionGateway();
+  const sent: Array<{ messages: ChatMessage[]; options: Record<string, unknown> }> = [];
+  const resolution: CompletionResolution = {
+    providerId, modelId, hop: 0, maxContextTokens: window,
+    capabilities: ['chat', 'tool_use'], toolFormat: toolFormatFor(providerId), optionOverrides: {},
+    providerManager: {
+      getProvider: () => ({ providerId, isInitialized: true }),
+      getModelInfo: async () => ({ modelId, providerId, contextWindowSize: window, capabilities: ['chat', 'tool_use'] }),
+    } as never,
+    chain: [{ provider: providerId, model: modelId }],
+  };
+  const gateway = {
+    resolve: async (_route: unknown, after?: CompletionResolution) => (after ? null : resolution),
+    stream: (hop: CompletionResolution, messages: ChatMessage[], options: Record<string, unknown>, responseSchema?: z.ZodType, schemaName = 'response') => {
+      const payload = responseSchema ? real.schemaPayload!(hop, responseSchema, schemaName) : undefined;
+      sent.push({ messages, options: { ...options, ...(responseSchema ? { responseFormat: payload, tools: undefined, toolChoice: undefined } : {}) } });
+      return Object.assign((async function* () { yield* textReply(answer); })(), { outcome: Promise.resolve<CompletionOutcome>({ kind: 'delivered' }) });
+    },
+    schemaInstruction: real.schemaInstruction,
+    schemaPayload: real.schemaPayload,
+    toolsSentWithSchema: real.toolsSentWithSchema,
+  } as unknown as CompletionGateway;
+  return { gateway, sent, resolution, real };
+}
+
+/** The request body the hop's provider writes for a recorded request: GeminiProvider's or AnthropicProvider's own. */
+async function wireRequestOf(providerId: 'gemini' | 'anthropic', modelId: string, request: { messages: ChatMessage[]; options: Record<string, unknown> }): Promise<Record<string, unknown>> {
+  type Builds = { buildRequestPayload: (modelId: string, messages: ChatMessage[], options: unknown, stream?: boolean) => Record<string, unknown> };
+  if (providerId === 'gemini') {
+    const provider = new GeminiProvider();
+    await provider.initialize({ apiKey: 'test-gemini-key' });
+    return (provider as unknown as Builds).buildRequestPayload(modelId, request.messages, request.options);
+  }
+  const provider = new AnthropicProvider();
+  await provider.initialize({ apiKey: 'test-anthropic-key' });
+  return (provider as unknown as Builds).buildRequestPayload(modelId, request.messages, request.options, true);
+}
+
+/** A response schema of one field whose description is the timetable tool's: about 7,400 tokens of JSON. */
+const longAnswerSchema = () => z.object({ pier: z.string().describe(TIMETABLE_TOOL.description) });
+
+describe('GMI request beside passthrough parameters on a hop whose provider strips them', () => {
+  it.each([
+    {
+      providerId: 'gemini' as const, modelId: 'gemini-3.5-flash',
+      schemaOnWire: (wire: Record<string, unknown>) => (wire.generationConfig as { responseSchema?: unknown } | undefined)?.responseSchema,
+    },
+    {
+      providerId: 'anthropic' as const, modelId: 'claude-sonnet-4-6',
+      schemaOnWire: (wire: Record<string, unknown>) => (wire.output_config as { format?: unknown } | undefined)?.format ?? wire.tools,
+    },
+  ])("on a $providerId hop a passthrough response_format is not sent, so the response schema's payload the request carries is counted", async ({ providerId, modelId, schemaOnWire }) => {
+    const { gateway, sent, resolution, real } = servingGateway(providerId, modelId, 32_000, '{"pier":"Pier 3"}');
+    const { gmi, promptEngine } = await createScriptedGmi({ gateway });
+    const construct = vi.spyOn(promptEngine, 'constructPrompt');
+    const schema = longAnswerSchema();
+    // Written for an OpenAI primary: OpenAI-compatible providers write it into the request in place of the payload.
+    const customModelParams = { response_format: { type: 'json_object' } };
+    await runTurn(gmi, textTurn('t1', 'Which pier does the island ferry leave from?', { options: { responseSchema: schema, schemaName: 'answer', customModelParams } } as never));
+    expect(sent).toHaveLength(1);
+    const payload = real.schemaPayload!(resolution, schema, 'answer');
+    expect(responseFormatCarriesSchema(payload), "the hop's request carries the schema as a parameter").toBe(true);
+
+    // The request as the hop's provider serializes it: the schema is sent, the passthrough response_format is not.
+    const wire = await wireRequestOf(providerId, modelId, sent[0]);
+    expect(wire.response_format, 'a response_format on the wire').toBeUndefined();
+    const onWire = schemaOnWire(wire);
+    expect(onWire, 'the schema on the wire').toBeDefined();
+    const wireTokens = await promptEngine.estimateTokenCount(JSON.stringify(onWire), modelId);
+    expect(wireTokens).toBeGreaterThan(5_000);
+
+    const built = construct.mock.calls[0][0] as PromptComponents & { reservedTokens?: number };
+    expect(built.reservedTokens ?? 0, `the reservation, beside a schema of ${wireTokens} tokens on the wire`).toBeGreaterThanOrEqual(wireTokens);
+    // The payload as the GMI counts it, and nothing for a passthrough the provider leaves out.
+    expect(built.reservedTokens).toBe(await promptEngine.estimateTokenCount(JSON.stringify(payload), modelId));
+  });
+
+  it.each([
+    { providerId: 'openai', modelId: 'host-model', counted: false },
+    { providerId: 'gemini', modelId: 'gemini-3.5-flash', counted: true },
+  ])("a passthrough generationConfig is counted on a $providerId hop only where that provider sends it", async ({ providerId, modelId, counted }) => {
+    const { gateway, sent } = servingGateway(providerId, modelId, 32_000, 'Pier 3.');
+    const { gmi, promptEngine } = await createScriptedGmi({ gateway });
+    const construct = vi.spyOn(promptEngine, 'constructPrompt');
+    // Written for a Gemini primary; OpenAI's request leaves Gemini's fields out.
+    const customModelParams = { generationConfig: { responseMimeType: 'application/json', responseSchema: { type: 'object', description: TIMETABLE_TOOL.description } } };
+    await runTurn(gmi, textTurn('t1', 'Which pier does the island ferry leave from?', { options: { customModelParams } } as never));
+    expect(sent).toHaveLength(1);
+    expect(sent[0].options.customModelParams).toEqual(customModelParams);
+    const passthroughTokens = await promptEngine.estimateTokenCount(JSON.stringify(customModelParams), modelId);
+    expect(passthroughTokens).toBeGreaterThan(7_300);
+    const tools = sent[0].options.tools;
+    const toolTokens = Array.isArray(tools) && tools.length > 0 ? await promptEngine.estimateTokenCount(JSON.stringify(tools), modelId) : 0;
+    const built = construct.mock.calls[0][0] as PromptComponents & { reservedTokens?: number };
+    expect(built.reservedTokens ?? 0, `the reservation beside ${passthroughTokens} tokens of passthrough parameters`).toBe(toolTokens + (counted ? passthroughTokens : 0));
+  });
+});
+
+describe('GMI request beside a response format a host gateway forwards on a response-schema turn', () => {
+  it.each([
+    { says: 'has no responseFormatReplacedWithSchema', replaced: undefined, counted: true },
+    { says: 'says the request is sent the forwarded format', replaced: () => false, counted: true },
+    { says: "says the schema's payload replaces the forwarded format", replaced: () => true, counted: false },
+  ])('a gateway that $says: the forwarded responseFormat is counted only where the request carries it', async ({ replaced, counted }) => {
+    // A host gateway that passes the turn's options through to its provider and reads the response schema only to
+    // check the answer.
+    const { gateway, sent } = hostGateway(32_000, '{"pier":"Pier 3"}');
+    if (replaced) Object.assign(gateway, { responseFormatReplacedWithSchema: replaced });
+    const { gmi, promptEngine } = await createScriptedGmi({ gateway });
+    const construct = vi.spyOn(promptEngine, 'constructPrompt');
+    const responseFormat = {
+      type: 'json_schema',
+      json_schema: { name: 'answer', strict: true, schema: { type: 'object', description: TIMETABLE_TOOL.description, properties: { pier: { type: 'string' } }, required: ['pier'], additionalProperties: false } },
+    };
+    await runTurn(gmi, textTurn('t1', 'Which pier does the island ferry leave from?', { options: { responseSchema: z.object({ pier: z.string() }), schemaName: 'answer', responseFormat } } as never));
+    expect(sent).toHaveLength(1);
+    expect(sent[0].responseFormat).toEqual(responseFormat);
+    const formatTokens = tokensOf(JSON.stringify(responseFormat));
+    expect(formatTokens).toBeGreaterThan(7_300);
+    // The gateway has no toolsSentWithSchema, so the turn's tools are counted beside the format.
+    const toolTokens = Array.isArray(sent[0].tools) && sent[0].tools.length > 0 ? tokensOf(JSON.stringify(sent[0].tools)) : 0;
+    const built = construct.mock.calls[0][0] as PromptComponents & { reservedTokens?: number };
+    expect(built.reservedTokens ?? 0, `the reservation, beside a forwarded format of ${formatTokens} tokens`).toBe(toolTokens + (counted ? formatTokens : 0));
   });
 });

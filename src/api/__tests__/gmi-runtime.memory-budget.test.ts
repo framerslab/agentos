@@ -799,3 +799,57 @@ describe("agent({ runtime: 'gmi' }) memory budget on a response-schema turn of a
     }
   });
 });
+
+describe("agent({ runtime: 'gmi' }) earlier history that holds tool rounds", () => {
+  /**
+   * Four earlier tool rounds, each a question, a tool call whose arguments are about 2,500 tokens of JSON, its result
+   * and the answer: about 10,000 tokens, more than the 8,000-token model's context, and more than the 2,800 its
+   * history share holds.
+   */
+  const ROUNDS = Array.from({ length: 4 }, (_, i) => [
+    { role: 'user', content: `Earlier crossing question ${i}: log the crossing.` },
+    {
+      role: 'assistant',
+      content: null,
+      tool_calls: [{ id: `call-${i}`, type: 'function', function: { name: 'log_crossing', arguments: JSON.stringify({ crossing: i, log: `Crossing log ${i}: ${'x'.repeat(10_000)}` }) } }],
+    },
+    { role: 'tool', tool_call_id: `call-${i}`, content: `Logged crossing ${i}.` },
+    { role: 'assistant', content: `Crossing ${i} is logged.` },
+  ]).flat();
+
+  it("a tool call's arguments are counted with the history: the oldest rounds are left out, and the request fits the model's context", async () => {
+    ids.next = 0;
+    const WINDOW = 8_000;
+    const k = key(); const emb = key();
+    const s = script('openai', k, { window: WINDOW, replies: [reply.text('Pier 3.')] });
+    script('openai', emb, { replies: [] });
+    vi.stubEnv('OPENAI_API_KEY', emb);
+    const a = withRecall(k);
+    try {
+      const session = a.session('s');
+      session.reseed(ROUNDS as never);
+      const result = (await session.send(QUESTION)) as { historyOmitted?: { messages: number; tokens: number } };
+
+      const request = s.seen[0];
+      expect(request, 'the question reached the model').toBeDefined();
+      const calls = request.messages.filter((message) => Array.isArray(message.tool_calls) && message.tool_calls.length > 0);
+      // Each text the request carries, each tool call's arguments as sent, and what travels beside the messages, by
+      // PromptEngine's estimate.
+      const texts = request.messages.flatMap(textPartsOf).reduce((sum, text) => sum + engineTokensOf(text), 0);
+      const callTokens = calls.reduce((sum, message) => sum + engineTokensOf(JSON.stringify(message.tool_calls)), 0);
+      const beside = besideOf(s, 0);
+      expect(
+        texts + callTokens + beside.tools + beside.payload,
+        `the request: ${texts} tokens of text and ${callTokens} of tool calls (${calls.length} of ${ROUNDS.length / 4} rounds)`,
+      ).toBeLessThanOrEqual(WINDOW);
+      // The newest round still reached the model, whole; the oldest were left out and reported.
+      expect(calls.length).toBeGreaterThan(0);
+      expect(calls.length).toBeLessThan(ROUNDS.length / 4);
+      expect(JSON.stringify(calls[calls.length - 1].tool_calls)).toContain('call-3');
+      expect(request.messages.some((message) => message.role === 'tool' && message.tool_call_id === 'call-3')).toBe(true);
+      expect(result.historyOmitted?.messages).toBeGreaterThan(0);
+    } finally {
+      await a.close();
+    }
+  });
+});
