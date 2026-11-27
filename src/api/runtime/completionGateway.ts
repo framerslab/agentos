@@ -268,6 +268,16 @@ export interface CompletionGateway {
    * the text in its prompt itself passes `schemaInPrompt` to `stream()`.
    */
   schemaInstruction?(resolution: CompletionResolution, responseSchema: ZodType, schemaName?: string): string | undefined;
+  /**
+   * The provider payload a hop's request carries `responseSchema` in, as
+   * `stream()` sends it (a strict `json_schema`, Anthropic's JSON output format
+   * or forced schema tool, Gemini's `responseSchema`); undefined when the hop's
+   * payload carries no schema, where {@link schemaInstruction} gives the text
+   * the hop's prompt needs. The payload travels beside the prompt, as tool
+   * schemas do, so a caller that sizes a request for the model's context
+   * counts its JSON with them.
+   */
+  schemaPayload?(resolution: CompletionResolution, responseSchema: ZodType, schemaName?: string): Record<string, unknown> | undefined;
 }
 
 /** The tool format a provider expects; the same mapping as GMI.determineToolFormat. */
@@ -1062,5 +1072,10 @@ export function createCompletionGateway(defaults: Partial<CompletionRoute> = {})
     return lowerForHop(resolution, responseSchema, schemaName).schemaInstruction;
   }
 
-  return { resolve, stream, schemaInstruction };
+  function schemaPayload(resolution: CompletionResolution, responseSchema: ZodType, schemaName = 'response'): Record<string, unknown> | undefined {
+    const { responseFormat } = lowerForHop(resolution, responseSchema, schemaName);
+    return responseFormatCarriesSchema(responseFormat) ? responseFormat : undefined;
+  }
+
+  return { resolve, stream, schemaInstruction, schemaPayload };
 }

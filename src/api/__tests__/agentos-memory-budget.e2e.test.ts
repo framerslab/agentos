@@ -43,7 +43,7 @@ import { AgentOS } from '../AgentOS';
 import { AgentOSResponseChunkType, type AgentOSResponse } from '../types/AgentOSResponse';
 import { CognitiveMemoryManager } from '../../cognition/memory/CognitiveMemoryManager';
 import type { CognitiveMemoryConfig, ManagerRecallConfig } from '../../cognition/memory/core/config';
-import { RecallOptionError } from '../../cognition/memory/retrieval/recall/budget';
+import { DEFAULT_RECALL_BUDGET_TOKENS, RecallOptionError } from '../../cognition/memory/retrieval/recall/budget';
 import { InMemoryVectorStore } from '../../cognition/rag/vector_stores/InMemoryVectorStore';
 import { InMemoryWorkingMemory } from '../../cognition/substrate/memory/InMemoryWorkingMemory';
 import type { IPersonaDefinition } from '../../cognition/substrate/personas/IPersonaDefinition';
@@ -152,13 +152,25 @@ const ASKED = 'Which parcel locker holds the camping stove?';
 type RecallRecord = { budget: { requested: number }; tokensUsed: number; candidates: Array<{ outcome: string; reason?: string }> };
 
 describe("a host manager's recall.budget.totalTokens", () => {
-  it('unset, the block is assembled in 1600 tokens and reaches the model', async () => {
+  it('unset, the block is assembled in the default budget and reaches the model', async () => {
     vi.spyOn(console, 'log').mockImplementation(() => undefined);
     const agentos = await boot({ capture: 'metadata+stream' });
     await turn(agentos, 's-default', SAID);
     const chunks = await turn(agentos, 's-default', ASKED);
     const record = finalOf(chunks)!.memoryRecall as RecallRecord | undefined;
+    expect(record?.budget.requested).toBe(DEFAULT_RECALL_BUDGET_TOKENS);
+    expect(record?.candidates.some((c) => c.outcome === 'included')).toBe(true);
+    expect(lastRequestTexts().some((text) => text.includes(PREAMBLE_HEADING))).toBe(true);
+  });
+
+  it('set to the earlier defaults (dense, no rerank, 1,600 tokens), the block is assembled in 1600 tokens and reaches the model', async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    const agentos = await boot({ retrieval: 'dense', rerank: 'none', budget: { totalTokens: 1600 }, capture: 'metadata+stream' });
+    await turn(agentos, 's-earlier', SAID);
+    const chunks = await turn(agentos, 's-earlier', ASKED);
+    const record = finalOf(chunks)!.memoryRecall as RecallRecord | undefined;
     expect(record?.budget.requested).toBe(1600);
+    expect(record?.tokensUsed).toBeLessThanOrEqual(1600);
     expect(record?.candidates.some((c) => c.outcome === 'included')).toBe(true);
     expect(lastRequestTexts().some((text) => text.includes(PREAMBLE_HEADING))).toBe(true);
   });

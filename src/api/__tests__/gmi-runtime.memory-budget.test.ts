@@ -9,6 +9,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import pino from 'pino';
+import { z } from 'zod';
 vi.mock('../../core/llm/providers/implementations/OpenAIProvider', async () => ({ OpenAIProvider: (await import('./helpers/stubProviders')).stubProviderClass('openai') }));
 vi.mock('../../core/llm/providers/implementations/AnthropicProvider', async () => ({ AnthropicProvider: (await import('./helpers/stubProviders')).stubProviderClass('anthropic') }));
 // Trace ids from a counter that each agent starts again: the block lists the ids of the traces in focus.
@@ -18,17 +19,20 @@ vi.mock('../../cognition/memory/core/util/crossPlatformCrypto', async (importOri
   return { ...actual, uuid: () => `trace-${String(++ids.next).padStart(4, '0')}` };
 });
 import { agent, type AgentOptions } from '../agent';
-import { reply, script, type ProviderScript } from './helpers/stubProviders';
+import { reply, script, systemTextOf, type ProviderScript } from './helpers/stubProviders';
 import { globalLLMProviderHealth } from '../../core/safety/LLMProviderHealthRegistry';
 import { resetLoggerFactory, setLogger } from '../../core/logging/loggerFactory';
 import type { ChatMessage } from '../../core/llm/providers/IProvider';
 import type { MemoryRecallCapture } from '../../cognition/memory/retrieval/recall/capture';
+import { DEFAULT_RECALL_BUDGET_TOKENS } from '../../cognition/memory/retrieval/recall/budget';
 
 let n = 0;
 const key = () => `k-memory-budget-${++n}`;
 
 /** Starts every memory block (the assembler's preamble). */
 const PREAMBLE_HEADING = '## How To Use Your Memories';
+/** The line a response schema's instruction gives the schema under, when the request's system text carries it. */
+const SCHEMA_LINE = 'The JSON MUST conform to this JSON Schema:';
 
 function textOf(message: ChatMessage): string {
   const content = message.content as unknown;
@@ -86,7 +90,9 @@ const STATEMENTS = Array.from(
 );
 const QUESTION = 'Which pier does the island harbor ferry leave from?';
 
-type Recall = { budget?: { totalTokens?: number }; capture?: 'off' | 'metadata' | 'metadata+stream' };
+type Recall = { budget?: { totalTokens?: number }; capture?: 'off' | 'metadata' | 'metadata+stream'; retrieval?: 'dense' | 'hybrid'; rerank?: 'none' };
+/** What a memory with no recall setting ran while the default budget was 1,600 tokens, written out as a setting. */
+const EARLIER_DEFAULTS: Recall = { retrieval: 'dense', rerank: 'none', budget: { totalTokens: 1600 } };
 /**
  * An agent whose sessions share cognitive memory (no mechanisms) that embeds through OpenAI, with the given recall
  * setting. Named, so its persona id, which each memory line's tags carry, is the same for every agent built here.
@@ -144,13 +150,24 @@ describe("agent({ runtime: 'gmi' }) memory.recall.budget and capture", () => {
     vi.setSystemTime(Date.UTC(2026, 10, 10, 12, 0, 0));
   });
 
-  it('with no recall setting the block is the one a budget of 1600 sends, byte for byte', async () => {
+  it('with no recall setting the block is the one the default budget sends as a setting, byte for byte', async () => {
     const unset = await ask();
-    const explicit = await ask({ budget: { totalTokens: 1600 } });
+    const explicit = await ask({ budget: { totalTokens: DEFAULT_RECALL_BUDGET_TOKENS } });
     expect(unset.block.length).toBeGreaterThan(0);
     expect(explicit.block).toBe(unset.block);
-    expect(unset.memoryRecall?.budget).toMatchObject({ requested: 1600 });
+    expect(unset.memoryRecall?.budget).toMatchObject({ requested: DEFAULT_RECALL_BUDGET_TOKENS });
+    expect(explicit.memoryRecall?.budget).toMatchObject({ requested: DEFAULT_RECALL_BUDGET_TOKENS });
+  });
+
+  it('the earlier defaults as a setting send the block a budget of 1600 alone sends, byte for byte', async () => {
+    const budgetAlone = await ask({ budget: { totalTokens: 1600 } });
+    const explicit = await ask(EARLIER_DEFAULTS);
+    expect(explicit.block.length).toBeGreaterThan(0);
+    expect(explicit.block).toBe(budgetAlone.block);
+    expect(tokensOf(explicit.block)).toBeLessThanOrEqual(1600);
+    expect(budgetAlone.memoryRecall?.budget).toMatchObject({ requested: 1600 });
     expect(explicit.memoryRecall?.budget).toMatchObject({ requested: 1600 });
+    expect(explicit.memoryRecall).toMatchObject({ retrieval: 'dense', reranker: { provider: 'none', reason: 'none_configured' } });
   });
 
   it('budget.totalTokens sizes the whole block, preamble included', async () => {
@@ -185,18 +202,18 @@ describe("agent({ runtime: 'gmi' }) memory.recall.budget and capture", () => {
   });
 
   it("stream(): memoryRecall settles with the record under 'metadata' and undefined under 'off'", async () => {
-    const on = await ask({ capture: 'metadata' }, 'stream');
+    const on = await ask({ ...EARLIER_DEFAULTS, capture: 'metadata' }, 'stream');
     expect(on.text).toBe('Pier 3.');
     expect(on.memoryRecall?.version).toBe('memory-recall-capture/1');
     expect(on.memoryRecall?.budget.requested).toBe(1600);
-    const off = await ask({ capture: 'off' }, 'stream');
+    const off = await ask({ ...EARLIER_DEFAULTS, capture: 'off' }, 'stream');
     expect(off.text).toBe('Pier 3.');
     expect(off.memoryRecall).toBeUndefined();
     expect(off.block).toBe(on.block);
   });
 
   it('stream(): a turn whose model call fails after its memory assembly still settles memoryRecall with the record', async () => {
-    const failed = await ask({ capture: 'metadata' }, 'stream', Object.assign(new Error('bad request'), { httpStatus: 400 }));
+    const failed = await ask({ ...EARLIER_DEFAULTS, capture: 'metadata' }, 'stream', Object.assign(new Error('bad request'), { httpStatus: 400 }));
     expect(failed.block).toContain(PREAMBLE_HEADING);
     expect(failed.text).toBe('');
     expect(failed.memoryRecall?.version).toBe('memory-recall-capture/1');
@@ -399,7 +416,8 @@ describe("agent({ runtime: 'gmi' }) memory budget across a fallback hop", () => 
     const a = agent({
       runtime: 'gmi', name: 'Harbor', provider: 'openai', model: 'stub-model', apiKey: k,
       fallbackProviders: [{ provider: 'anthropic', model: 'claude-x' }],
-      cognition: { memory: { embedding: { provider: 'openai' } }, mechanisms: false },
+      // The 1,600-token selection: the 3,000-token model's share of 600 is under the block it fills.
+      cognition: { memory: { embedding: { provider: 'openai' }, recall: EARLIER_DEFAULTS }, mechanisms: false },
     } as unknown as AgentOptions);
     try {
       const session = a.session('s');
@@ -458,5 +476,149 @@ describe("agent({ runtime: 'gmi' }) memory budget across a fallback hop", () => 
     expect(record.delivery).toEqual({ memoryBlockTokens: expect.any(Number) });
     expect(record.delivery!.memoryBlockTokens).toBeGreaterThan(0);
     expect(events('memory.recall.budget_clamped')).toEqual([expect.objectContaining({ requested: 1600, effective: 600, hop: 0, reason: 'prompt_share' })]);
+  });
+});
+
+describe("agent({ runtime: 'gmi' }) memory budget beside a response schema the prompt carries", () => {
+  it("the schema's instruction is one of the prompt's fixed parts: the block is sized beside it, and the request fits the model's context", async () => {
+    ids.next = 0;
+    const WINDOW = 8_000;
+    // PromptEngine's estimate on a Claude model id: 4.2 characters a token.
+    const engineTokensOf = (text: string) => Math.ceil(text.length / 4.2);
+    // Claude Sonnet 5.5 takes a schema with a record in no payload, so the request carries it in a system message of
+    // its own, written after PromptEngine built the prompt. A hundred named fields make that message a long one.
+    const logShape: Record<string, z.ZodOptional<z.ZodString>> = {};
+    for (let i = 0; i < 100; i += 1) logShape[`harbor_log_entry_for_crossing_${i}`] = z.string().optional();
+    const schema = z.object({ pier: z.string(), crossings: z.record(z.string(), z.number()) }).extend(logShape);
+    const answer = '{"pier":"Pier 3","crossings":{"morning":2}}';
+    const k = key(); const emb = key();
+    const s = script('anthropic', k, { window: WINDOW, replies: [...STATEMENTS.map(() => reply.text('Noted.')), reply.text(answer), reply.text(answer)] });
+    script('openai', emb, { replies: [] });
+    vi.stubEnv('OPENAI_API_KEY', emb);
+    const a = agent({
+      runtime: 'gmi',
+      name: 'Harbor',
+      provider: 'anthropic',
+      model: 'claude-sonnet-5-5',
+      apiKey: k,
+      fallbackProviders: [],
+      cognition: { memory: { embedding: { provider: 'openai' } }, mechanisms: false },
+    } as unknown as AgentOptions);
+    try {
+      const session = a.session('s');
+      for (const statement of STATEMENTS) await session.send(statement);
+      // A short question first, to read how many tokens the system text takes with the schema's instruction in it.
+      session.clear();
+      await session.send(QUESTION, { responseSchema: schema, schemaName: 'crossing_report' });
+      const systemText = systemTextOf(s.seen[STATEMENTS.length].messages);
+      expect(systemText).toContain(SCHEMA_LINE);
+      expect(systemText).toContain('harbor_log_entry_for_crossing_99');
+      const systemTokens = engineTokensOf(systemText);
+      expect(systemTokens, 'the system text with the schema instruction').toBeGreaterThan(1_000);
+      expect(systemTokens).toBeLessThan(WINDOW - 2_000);
+
+      // A question that, with that system text, leaves about 600 tokens of the model's context: less than the 1,600
+      // its retrieved-context share holds, and less than the block the twelve notes fill.
+      const filler = Array.from({ length: 400 }, (_, i) => `Background paragraph ${i}: the island ferry leaves its pier and the ticket desk opens before each crossing.`).join(' ');
+      const question = `${QUESTION} ${filler}`.slice(0, Math.floor((WINDOW - systemTokens - 600) * 4.2));
+      session.clear();
+      logged.length = 0;
+      const result = await session.send(question, { responseSchema: schema, schemaName: 'crossing_report' });
+      expect(result.object).toEqual({ pier: 'Pier 3', crossings: { morning: 2 } });
+
+      // The request the model received fits its context, by PromptEngine's estimate of each text it carries.
+      const request = s.seen[STATEMENTS.length + 1];
+      expect(request, 'the question reached the model').toBeDefined();
+      expect(systemTextOf(request.messages)).toContain('harbor_log_entry_for_crossing_99');
+      const block = memoryBlockOf(s, STATEMENTS.length + 1);
+      const sent = request.messages.flatMap(textPartsOf).reduce((sum, text) => sum + engineTokensOf(text), 0);
+      expect(sent, `the request, its memory block ${engineTokensOf(block)} tokens`).toBeLessThanOrEqual(WINDOW);
+
+      // The record counts the instruction among the fixed parts, and the block's budget is what they leave.
+      const budget = result.memoryRecall!.budget;
+      expect(budget).toMatchObject({ requested: DEFAULT_RECALL_BUDGET_TOKENS, clampReason: 'fixed_prompt', promptShareTokens: 1600, otherContextTokens: 0, hop: 0, reassembled: true });
+      expect(budget.fixedPromptTokens).toBeGreaterThanOrEqual(engineTokensOf(systemTextOf(request.messages)) + engineTokensOf(question));
+      expect(budget.effective).toBe(WINDOW - budget.fixedPromptTokens!);
+      // PromptEngine counts a Claude model id's tokens longer than the assembler's, so the bound is not divided.
+      expect(budget.blockTokenRate).toBeUndefined();
+      expect(budget.effective).toBeGreaterThan(300);
+      expect(tokensOf(block)).toBeLessThanOrEqual(budget.effective);
+      expect(events('memory.recall.budget_clamped')).toEqual([expect.objectContaining({ requested: DEFAULT_RECALL_BUDGET_TOKENS, hop: 0, reason: 'fixed_prompt' })]);
+    } finally {
+      await a.close();
+    }
+  });
+});
+
+describe("agent({ runtime: 'gmi' }) memory budget beside a response schema the request's payload carries", () => {
+  it("the schema's payload is one of the request's fixed parts: the block is sized beside it, and the request fits the model's context", async () => {
+    ids.next = 0;
+    const WINDOW = 8_000;
+    // On this model id PromptEngine counts four characters a token, as the assembler does.
+    const engineTokensOf = (text: string) => Math.ceil(text.length / 4);
+    // OpenAI takes this schema as a strict `json_schema` payload, so no message of the prompt carries it: it travels
+    // beside the prompt, as tool schemas do. A hundred named fields make that payload a long one.
+    const logShape: Record<string, z.ZodOptional<z.ZodString>> = {};
+    for (let i = 0; i < 100; i += 1) logShape[`harbor_log_entry_for_crossing_${i}`] = z.string().optional();
+    const schema = z.object({ pier: z.string() }).extend(logShape);
+    const answer = '{"pier":"Pier 3"}';
+    const k = key(); const emb = key();
+    const s = script('openai', k, { window: WINDOW, replies: [...STATEMENTS.map(() => reply.text('Noted.')), reply.text(answer), reply.text(answer)] });
+    script('openai', emb, { replies: [] });
+    vi.stubEnv('OPENAI_API_KEY', emb);
+    const a = withRecall(k);
+    /** The schema payload of a request, as the provider received it, and PromptEngine's estimate of its JSON. */
+    const payloadOf = (call: number) => {
+      const format = s.seen[call]?.options.responseFormat as { type?: string } | undefined;
+      return { format, tokens: format ? engineTokensOf(JSON.stringify(format)) : 0 };
+    };
+    try {
+      const session = a.session('s');
+      for (const statement of STATEMENTS) await session.send(statement);
+      // A short question first, to read how many tokens the system text and the schema's payload take.
+      session.clear();
+      await session.send(QUESTION, { responseSchema: schema, schemaName: 'crossing_report' });
+      const first = payloadOf(STATEMENTS.length);
+      expect(first.format, 'the schema payload of the request').toMatchObject({ type: 'json_schema' });
+      expect(JSON.stringify(first.format)).toContain('harbor_log_entry_for_crossing_99');
+      expect(first.tokens, 'the schema payload').toBeGreaterThan(1_500);
+      const systemTokens = engineTokensOf(systemTextOf(s.seen[STATEMENTS.length].messages));
+      expect(systemTokens + first.tokens).toBeLessThan(WINDOW - 2_000);
+
+      // A question that, with that system text and that payload, leaves about 700 tokens of the model's context: less
+      // than the 1,600 its retrieved-context share holds, and less than the block the twelve notes fill.
+      const filler = Array.from({ length: 400 }, (_, i) => `Background paragraph ${i}: the island ferry leaves its pier and the ticket desk opens before each crossing.`).join(' ');
+      const question = `${QUESTION} ${filler}`.slice(0, (WINDOW - systemTokens - first.tokens - 700) * 4);
+      session.clear();
+      logged.length = 0;
+      const result = await session.send(question, { responseSchema: schema, schemaName: 'crossing_report' });
+      expect(result.object).toEqual({ pier: 'Pier 3' });
+
+      // The request the model received fits its context: each text it carries and the schema's payload, by
+      // PromptEngine's estimate.
+      const request = s.seen[STATEMENTS.length + 1];
+      expect(request, 'the question reached the model').toBeDefined();
+      const payload = payloadOf(STATEMENTS.length + 1);
+      expect(payload.format).toEqual(first.format);
+      const block = memoryBlockOf(s, STATEMENTS.length + 1);
+      const texts = request.messages.flatMap(textPartsOf).reduce((sum, text) => sum + engineTokensOf(text), 0);
+      const budget = result.memoryRecall!.budget;
+      expect(
+        texts + payload.tokens,
+        `the request: ${texts} tokens of text, its memory block ${engineTokensOf(block)} of them, and a schema payload of ${payload.tokens}; the fixed parts were counted as ${budget.fixedPromptTokens}`,
+      ).toBeLessThanOrEqual(WINDOW);
+
+      // The record counts the payload among the fixed parts, and the block's budget is what they leave.
+      expect(budget).toMatchObject({ requested: DEFAULT_RECALL_BUDGET_TOKENS, clampReason: 'fixed_prompt', promptShareTokens: 1600, otherContextTokens: 0, hop: 0, reassembled: true });
+      expect(budget.fixedPromptTokens).toBeGreaterThanOrEqual(engineTokensOf(systemTextOf(request.messages)) + engineTokensOf(question) + payload.tokens);
+      expect(budget.effective).toBe(WINDOW - budget.fixedPromptTokens!);
+      // PromptEngine counts this model id's tokens as the assembler does, so the bound is not divided.
+      expect(budget.blockTokenRate).toBeUndefined();
+      expect(budget.effective).toBeGreaterThan(0);
+      expect(tokensOf(block)).toBeLessThanOrEqual(budget.effective);
+      expect(events('memory.recall.budget_clamped')).toEqual([expect.objectContaining({ requested: DEFAULT_RECALL_BUDGET_TOKENS, hop: 0, reason: 'fixed_prompt' })]);
+    } finally {
+      await a.close();
+    }
   });
 });

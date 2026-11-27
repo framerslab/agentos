@@ -113,12 +113,30 @@ export interface MemoryRecallCapture {
     requested: number;
     /** The budget the block was rendered in. */
     effective: number;
-    /** Set when a model's share of the prompt held less than `requested`: `zero_remaining` when nothing was left. */
-    clampReason?: 'prompt_share' | 'zero_remaining';
+    /**
+     * Set when the serving model held less than `requested`: `prompt_share` when what was left of its share of the
+     * prompt was the smaller bound, `fixed_prompt` when what the prompt's fixed parts left of its context was, and
+     * `zero_remaining` when nothing was left.
+     */
+    clampReason?: 'prompt_share' | 'fixed_prompt' | 'zero_remaining';
     /** The serving model's retrieved-context share, in tokens (a GMI turn's record). */
     promptShareTokens?: number;
     /** The turn's RAG and long-term-memory text, in tokens, which the share holds first (a GMI turn's record). */
     otherContextTokens?: number;
+    /**
+     * The parts of the hop's request that are never reduced, in tokens, as the prompt engine counts them: the system
+     * prompt, the current turn's messages, the host's note, the tool schemas and the turn's response schema as the
+     * hop carries it, its instruction in the prompt or its payload beside it (a GMI turn's record, on a prompt engine
+     * that counts them). The block's budget is never above the model's context less this.
+     */
+    fixedPromptTokens?: number;
+    /**
+     * How many tokens the prompt engine counts for one of the block's own (the assembler's) on the serving model,
+     * when that is more than 1: 1.053 on a model id PromptEngine counts at 3.8 characters a token. What the fixed
+     * parts leave of the context is divided by it, so the block fits there by the engine's count too (a GMI turn's
+     * record).
+     */
+    blockTokenRate?: number;
     /** The model hop the record is for, 0 for the route's primary (a GMI turn's record). */
     hop?: number;
     /** True when the block was rendered again at `effective` from the turn's recall, with no second retrieval. */

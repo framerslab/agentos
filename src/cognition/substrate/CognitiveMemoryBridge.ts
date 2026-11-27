@@ -125,6 +125,8 @@ export function captureForHop(capture: MemoryRecallCapture, budget: EffectiveRec
       effective: budget.effective,
       ...(budget.clampReason ? { clampReason: budget.clampReason } : {}),
       ...(budget.promptShareTokens !== undefined ? { promptShareTokens: budget.promptShareTokens, otherContextTokens: budget.otherContextTokens } : {}),
+      ...(budget.fixedPromptTokens !== undefined ? { fixedPromptTokens: budget.fixedPromptTokens } : {}),
+      ...(budget.blockTokenRate !== undefined ? { blockTokenRate: budget.blockTokenRate } : {}),
       hop,
       ...(reassembled ? { reassembled: true } : {}),
     },
@@ -489,7 +491,7 @@ export class CognitiveMemoryBridge {
    * Assembles a cognitive memory context suitable for injection into the LLM prompt.
    *
    * Queries the memory store for relevant traces, assembles them into a text
-   * block within the manager's `recall.budget.totalTokens` (1600 tokens when
+   * block within the manager's `recall.budget.totalTokens` (6400 tokens when
    * unset, the preamble included), and returns the assembled context.
    * Retrieval is limited to the scopes returned by
    * {@link CognitiveMemoryBridge.buildRetrievalScopes}, so a memory backend
@@ -521,7 +523,7 @@ export class CognitiveMemoryBridge {
       }
       // On a souled agent's mind, what the recall reads drifts only where the turn's answer says it may.
       const skipReconsolidation = this.isMindManager() && turn?.soulAnswer?.reconsolidation !== true;
-      // The manager's recall.budget.totalTokens, 1600 when unset: the whole block, its preamble included.
+      // The manager's recall.budget.totalTokens, 6400 when unset: the whole block, its preamble included.
       const context = await this.cognitiveMemory.assembleForPrompt(
         query,
         recallBudgetTokens(this.recallConfig()),
@@ -572,7 +574,7 @@ export class CognitiveMemoryBridge {
     }
   }
 
-  /** The configured budget of the memory block: the manager's `recall.budget.totalTokens`, 1600 when unset. */
+  /** The configured budget of the memory block: the manager's `recall.budget.totalTokens`, 6400 when unset. */
   public budgetTokens(): number {
     return recallBudgetTokens(this.recallConfig());
   }
@@ -583,7 +585,7 @@ export class CognitiveMemoryBridge {
    * smaller gets the block rendered again at `budget.effective`, through the manager's `reassembleForBudget` (no
    * retrieval, no embedding call), else, for a manager without that method, through `assembleForPrompt` again at that
    * budget with the turn's query and scopes. A `reassembleForBudget` that rejects is not followed by a second recall. A budget whose inputs were not valid leaves the block as it is, with one
-   * `memory.recall.budget_clamped` line (`invalid`); a clamp writes one (`prompt_share` or `zero_remaining`), and a
+   * `memory.recall.budget_clamped` line (`invalid`); a clamp writes one (`prompt_share`, `fixed_prompt` or `zero_remaining`), and a
    * budget of 0 also one `memory.recall.allocation_exhausted`.
    *
    * @param context - The turn's first rendering.

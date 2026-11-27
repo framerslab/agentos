@@ -612,6 +612,30 @@ export interface IPromptEngine {
   ): Promise<PromptEngineResult>;
 
   /**
+   * Estimates the tokens of the parts of a prompt that the engine never reduces to fit a model's budget, counted as
+   * the engine counts them when it builds the prompt. For PromptEngine these are the system prompts, `userInput`, the
+   * current turn's messages, the tools and the application note beside a memory block; the memory block, the other
+   * retrieved context and the history before the turn are left out.
+   *
+   * The GMI holds a turn's memory block to what this figure, the tool schemas it sends and a response schema's
+   * instruction it writes into the prompt leave of the model's context, since the block is never reduced either. It
+   * reads the engine's count of a block's token through `estimateTokenCount`, so the block fits there by this
+   * engine's count. An engine without the method gets no such bound: its block is sized by the model's
+   * retrieved-context share alone.
+   *
+   * @async
+   * @param {Readonly<PromptComponents>} components - The prompt's components, as `constructPrompt` takes them.
+   * @param {Readonly<ModelTargetInfo>} modelTargetInfo - The model the prompt is built for.
+   * @param {Readonly<PromptExecutionContext>} [executionContext] - The turn's execution context.
+   * @returns {Promise<number>} The tokens of the fixed parts: a finite number of at least 0.
+   */
+  estimateFixedPromptTokens?(
+    components: Readonly<PromptComponents>,
+    modelTargetInfo: Readonly<ModelTargetInfo>,
+    executionContext?: Readonly<PromptExecutionContext>
+  ): Promise<number>;
+
+  /**
    * Evaluates whether a given set of `ContextualPromptElementCriteria` is satisfied by the current
    * `PromptExecutionContext`. This method is the core of the dynamic adaptation logic, determining
    * which contextual elements are relevant and should be incorporated into the prompt.

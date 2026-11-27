@@ -397,7 +397,10 @@ describe('a host note through processRequest(): a provider that takes text parts
     const requests = model.seen.slice(before);
     expect(requests.length).toBeGreaterThan(0);
     for (const { messages } of requests) {
-      expect(firstTextOf(newestUser(messages)).startsWith(`${FRAME}\n${note}\n\n---\n\n`)).toBe(true);
+      // The note whole. It is one of the prompt's fixed parts, and one as large as the model's context leaves the
+      // turn's memory block nothing of it, so no block follows the note.
+      expect(firstTextOf(newestUser(messages)).startsWith(`${FRAME}\n${note}`)).toBe(true);
+      expect(JSON.stringify(messages)).not.toContain(PREAMBLE_HEADING);
     }
   });
 });

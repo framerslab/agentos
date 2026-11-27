@@ -93,6 +93,12 @@ import { SOUL_TURN_NOTHING, type SoulTurnAnswer, type SoulTurnMemory } from './s
 
 const DEFAULT_MAX_CONVERSATION_HISTORY_TURNS = 20;
 const DEFAULT_SELF_REFLECTION_INTERVAL_TURNS = 5;
+/**
+ * A text of 1,000 of the memory assembler's tokens (4,000 characters). The prompt engine's count of it, over 1,000, is
+ * how many tokens the engine counts for one of a memory block's own on a model: 1.053 for PromptEngine on a model id it
+ * counts at 3.8 characters a token.
+ */
+const BLOCK_TOKEN_RATE_PROBE = 'm'.repeat(4_000);
 /** How long a turn waits for its learner session's preparation before it goes on without it, in milliseconds. */
 const LEARNING_PREPARE_BUDGET_MS = 2_000;
 /** The turn's sentiment log: one `gmi.sentiment_late` line for an analysis the post-turn check drops. */
@@ -1084,6 +1090,100 @@ export class GMI implements IGMI {
    * Adds an entry to the GMI's reasoning trace.
    * @private
    */
+  /**
+   * The response schema's instruction a hop's prompt is sent with: the gateway's, where the hop's payload does not
+   * carry the turn's schema and the system prompt does not already hold its instruction.
+   *
+   * @param resolution - The hop, when a completion gateway resolved one.
+   * @param responseSchema - The turn's response schema, when it has one.
+   * @param schemaName - The schema's name.
+   * @param schemaInPrompt - Whether the system prompt already holds the schema's instruction.
+   * @returns The instruction; undefined when the hop's prompt takes none.
+   * @throws Whatever the gateway's lowering of the schema throws.
+   */
+  private schemaInstructionFor(
+    resolution: CompletionResolution | null,
+    responseSchema: ZodType | undefined,
+    schemaName: string | undefined,
+    schemaInPrompt: boolean,
+  ): string | undefined {
+    const gateway = this.config.completionGateway;
+    if (!gateway || !resolution || !responseSchema || schemaInPrompt) return undefined;
+    return gateway.schemaInstruction?.(resolution, responseSchema, schemaName);
+  }
+
+  /**
+   * The provider payload a hop's request carries the turn's response schema in: the gateway's, where the hop's
+   * provider and model take the schema as a request parameter. It is sent whether or not the system prompt holds the
+   * schema's instruction too.
+   *
+   * @param resolution - The hop, when a completion gateway resolved one.
+   * @param responseSchema - The turn's response schema, when it has one.
+   * @param schemaName - The schema's name.
+   * @returns The payload; undefined when the hop's request carries the schema in none.
+   * @throws Whatever the gateway's lowering of the schema throws.
+   */
+  private schemaPayloadFor(
+    resolution: CompletionResolution | null,
+    responseSchema: ZodType | undefined,
+    schemaName: string | undefined,
+  ): Record<string, unknown> | undefined {
+    const gateway = this.config.completionGateway;
+    if (!gateway || !resolution || !responseSchema) return undefined;
+    return gateway.schemaPayload?.(resolution, responseSchema, schemaName);
+  }
+
+  /**
+   * The parts of a hop's request that nothing reduces to fit the model, counted for the memory block's budget
+   * ({@link effectiveRecallBudget}): the prompt's fixed parts as the prompt engine counts them
+   * (`estimateFixedPromptTokens`: the system prompts, the current turn's messages, the host's note), the tool schemas
+   * the turn offers beside the prompt, as the engine's estimate of their JSON, and the turn's response schema as the
+   * hop carries it: its instruction when the hop's prompt carries the schema, and its payload, as the engine's
+   * estimate of its JSON, when the hop's request carries the schema as a parameter. With them, how many tokens the
+   * engine counts for one of the block's own on this model: the block is rendered in the assembler's tokens, which the
+   * engine can count as more.
+   *
+   * @param components - The turn's prompt components, without the hop's memory block.
+   * @param modelTargetInfo - The hop's model.
+   * @param executionContext - The turn's prompt execution context.
+   * @param tools - The tool schemas the turn offers.
+   * @param schemaInstruction - The response schema's instruction the hop's prompt is sent with, when it has one.
+   * @param schemaPayload - The provider payload the hop's request carries the response schema in, when it has one.
+   * @returns The count and the rate; undefined when the engine has no `estimateFixedPromptTokens`, or its count failed
+   *   or was not a finite number of at least 0 (one reasoning-trace warning), so the block is sized by the prompt
+   *   share alone.
+   */
+  private async fixedPromptPartsOf(
+    components: PromptComponents,
+    modelTargetInfo: ModelTargetInfo,
+    executionContext: PromptExecutionContext,
+    tools: ModelCompletionOptions['tools'],
+    schemaInstruction: string | undefined,
+    schemaPayload: Record<string, unknown> | undefined,
+  ): Promise<{ fixedPromptTokens: number; blockTokenRate: number } | undefined> {
+    const engine = this.promptEngine;
+    if (typeof engine.estimateFixedPromptTokens !== 'function') return undefined;
+    try {
+      const modelId = modelTargetInfo.modelId;
+      const promptTokens = await engine.estimateFixedPromptTokens(components, modelTargetInfo, executionContext);
+      const toolSchemaTokens = tools && tools.length > 0 ? await engine.estimateTokenCount(JSON.stringify(tools), modelId) : 0;
+      const schemaInstructionTokens = schemaInstruction ? await engine.estimateTokenCount(schemaInstruction, modelId) : 0;
+      // The payload is sent beside the prompt, as the tool schemas are, and is counted as they are.
+      const schemaPayloadTokens = schemaPayload ? await engine.estimateTokenCount(JSON.stringify(schemaPayload), modelId) : 0;
+      const fixedPromptTokens = promptTokens + toolSchemaTokens + schemaInstructionTokens + schemaPayloadTokens;
+      const blockTokenRate = (await engine.estimateTokenCount(BLOCK_TOKEN_RATE_PROBE, modelId)) / estimateMemoryTokens(BLOCK_TOKEN_RATE_PROBE);
+      if (typeof fixedPromptTokens === 'number' && Number.isFinite(fixedPromptTokens) && fixedPromptTokens >= 0) {
+        return { fixedPromptTokens, blockTokenRate };
+      }
+      this.addTraceEntry(ReasoningEntryType.WARNING, "The prompt's fixed parts were not counted as a number; the memory block is sized by the prompt share alone.");
+    } catch (error: unknown) {
+      this.addTraceEntry(ReasoningEntryType.WARNING, "Counting the prompt's fixed parts failed; the memory block is sized by the prompt share alone.", {
+        errorName: error instanceof Error ? error.name : typeof error,
+      });
+    }
+    return undefined;
+  }
+
   private addTraceEntry(type: ReasoningEntryType, message: string, details?: Record<string, any>, timestamp?: Date): void {
     while (this.reasoningTrace.entries.length >= this.traceLimits.maxEntries) {
       this.reasoningTrace.entries.shift();
@@ -2361,19 +2461,41 @@ export class GMI implements IGMI {
               }
             : await this.legacyModelTargetInfo(modelIdToUse, providerIdForModel);
 
-          // The memory block for this hop's model: the turn's first rendering where the model's share of the prompt
-          // holds it, else the block rendered again at what the share leaves after the RAG and long-term-memory text
-          // (no second recall). Later calls of the turn (tool continuations) assembled nothing and send no block.
+          // The memory block for this hop's model: the turn's first rendering where the model holds it, else the block
+          // rendered again (no second recall) at the smaller of what the model's share of the prompt leaves after the
+          // RAG and long-term-memory text and what the prompt's fixed parts leave of the model's context. Later calls of
+          // the turn (tool continuations) assembled nothing and send no block.
           let hopMemoryContext: AssembledMemoryContext | null = assembledMemoryContext;
           let hopCapture: MemoryRecallCapture | undefined = assembledMemoryContext?.capture;
+          // The schema instruction of this hop, once it has been lowered for the memory block's budget.
+          let hopSchemaInstruction: string | undefined;
           const ragTokens = estimateMemoryTokens(augmentedContextFromRAG);
           const longTermMemoryTokens = estimateMemoryTokens(injectedLongTermMemoryContext);
           if (assembledMemoryContext && this.memoryBridge) {
             const hop = resolution?.hop ?? 0;
+            // The response schema's instruction, where this hop's prompt carries the schema, is sent as a system message
+            // after the prompt is built: it is a fixed part too. A lowering that throws here throws again below, where
+            // the instruction is written into the prompt.
+            try {
+              hopSchemaInstruction = this.schemaInstructionFor(resolution, responseSchema, schemaName, schemaInPrompt);
+            } catch {
+              hopSchemaInstruction = undefined;
+            }
+            // So is the schema's payload, where this hop's request carries the schema as a parameter: it is sent beside
+            // the prompt, as the tool schemas are. A lowering that throws here throws again in the gateway, where the
+            // payload is built for the request.
+            let hopSchemaPayload: Record<string, unknown> | undefined;
+            try {
+              hopSchemaPayload = this.schemaPayloadFor(resolution, responseSchema, schemaName);
+            } catch {
+              hopSchemaPayload = undefined;
+            }
+            const fixedParts = await this.fixedPromptPartsOf(promptComponents, modelTargetInfo, promptExecContext, llmOptions.tools, hopSchemaInstruction, hopSchemaPayload);
             const hopBudget = effectiveRecallBudget({
               totalTokens: this.memoryBridge.budgetTokens(),
               contextTokens: modelTargetInfo.optimalContextTokens || modelTargetInfo.maxContextTokens,
               otherContextTokens: ragTokens + longTermMemoryTokens,
+              ...(fixedParts ?? {}),
             });
             hopMemoryContext = await this.memoryBridge.contextForHop(assembledMemoryContext, hopBudget, hop);
             hopCapture = hopMemoryContext
@@ -2462,7 +2584,7 @@ export class GMI implements IGMI {
           let promptForHook: ChatMessage[] = promptMessages;
           let attemptSchemaInPrompt = schemaInPrompt;
           if (gateway && resolution && responseSchema && !schemaInPrompt) {
-            const instruction = gateway.schemaInstruction?.(resolution, responseSchema, schemaName);
+            const instruction = hopSchemaInstruction ?? gateway.schemaInstruction?.(resolution, responseSchema, schemaName);
             if (instruction) {
               promptForHook = withSystemMessage(promptMessages, instruction);
               attemptSchemaInPrompt = true;

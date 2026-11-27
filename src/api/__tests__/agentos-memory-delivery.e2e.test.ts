@@ -6,8 +6,9 @@
  * `processRequest()` turns of one user. Only the OpenAI provider class is stubbed (helpers/stubProviders.ts), with a
  * small context window, so the real runtime, turn pipeline, GMI, memory bridge and PromptEngine run, and what reached
  * the model is read from the request the stub received. The block's budget is what the model's retrieved-context
- * share leaves after the long-term-memory text; PromptEngine never reduces the block; and the final response's
- * `memoryRecall` names the clamp and what was delivered.
+ * share leaves after the long-term-memory text, and no more than the prompt's fixed parts leave of the model's
+ * context; PromptEngine never reduces the block; and the final response's `memoryRecall` names the clamp and what
+ * was delivered.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 vi.mock('../../core/llm/providers/implementations/OpenAIProvider', async (importOriginal) => ({
@@ -69,7 +70,9 @@ async function memoryManager(): Promise<CognitiveMemoryManager> {
       generateEmbeddings: async ({ texts }: { texts: string | string[] }) => ({ embeddings: (Array.isArray(texts) ? texts : [texts]).map(wordHash) }),
     },
     graph: { disabled: true },
-    recall: { capture: 'metadata+stream' },
+    // A block of 1,600 tokens, written out with the retrieval and rerank it runs beside: the cases below size their
+    // models and long-term-memory text against it.
+    recall: { retrieval: 'dense', rerank: 'none', budget: { totalTokens: 1600 }, capture: 'metadata+stream' },
   } as unknown as CognitiveMemoryConfig);
   managers.push(manager);
   return manager;
@@ -216,20 +219,27 @@ describe('the memory block beside a host long-term-memory retriever, through pro
 
   it('a prompt over its budget keeps the block whole and reduces only the long-term-memory text, and the final response names the cut', async () => {
     vi.spyOn(console, 'log').mockImplementation(() => undefined);
-    // 4,000 tokens of context: the share is 800. About 280 tokens of long-term-memory text leave about 520 for memory.
-    // The question is about 3,500 tokens, which PromptEngine never reduces, so the prompt is over its budget: the
-    // earlier turns and the long-term-memory text are reduced, and every memory line the block shows reaches the model whole.
-    const longTerm = Array.from({ length: 20 }, (_, i) => `Profile line ${i}: the learner prefers morning crossings.`).join('\n');
+    // 8,000 tokens of context: the share is 1,600. About 900 tokens of long-term-memory text leave about 700 for
+    // memory. The question is about 6,800 tokens, which PromptEngine never reduces: it leaves the block more of the
+    // context than the share does, so the share sizes the block, and with the block and the long-term-memory text the
+    // prompt is over its budget. The earlier turns and the long-term-memory text are reduced, and every memory line the
+    // block shows reaches the model whole.
+    const longTerm = Array.from({ length: 65 }, (_, i) => `Profile line ${i}: the learner prefers morning crossings.`).join('\n');
     const otherTokens = tokensOf(longTerm);
-    const filler = Array.from({ length: 140 }, (_, i) => `Background paragraph ${i}: the island ferry leaves its pier and the ticket desk opens before each crossing.`).join(' ');
+    expect(otherTokens).toBeGreaterThan(880);
+    expect(otherTokens).toBeLessThan(940);
+    const filler = Array.from({ length: 255 }, (_, i) => `Background paragraph ${i}: the island ferry leaves its pier and the ticket desk opens before each crossing.`).join(' ');
     const question = `Which pier does the island harbor ferry leave from? ${filler}`;
-    expect(tokensOf(question)).toBeGreaterThan(3_400);
-    const { agentos, model, manager } = await boot(4_000, retrieverOf(longTerm));
+    expect(tokensOf(question)).toBeGreaterThan(6_750);
+    expect(tokensOf(question)).toBeLessThan(6_850);
+    const { agentos, model, manager } = await boot(8_000, retrieverOf(longTerm));
     for (const statement of STATEMENTS) await turn(agentos, model, statement, 'Noted.');
     const final = await turn(agentos, model, question, 'Pier 3.');
 
     const record = final.memoryRecall as MemoryRecallCapture;
-    expect(record.budget).toMatchObject({ requested: 1600, effective: 800 - otherTokens, clampReason: 'prompt_share', promptShareTokens: 800, otherContextTokens: otherTokens, hop: 0, reassembled: true });
+    expect(record.budget).toMatchObject({ requested: 1600, effective: 1600 - otherTokens, clampReason: 'prompt_share', promptShareTokens: 1600, otherContextTokens: otherTokens, hop: 0, reassembled: true });
+    // What the fixed parts leave of the context is more than the share's remainder, so it is not the bound here.
+    expect(8_000 - record.budget.fixedPromptTokens!).toBeGreaterThanOrEqual(1600 - otherTokens);
     expect(record.delivery!.memoryBlockTokens).toBeGreaterThan(0);
     expect(record.delivery!.memoryBlockTokens).toBeLessThanOrEqual(record.budget.effective);
     expect(record.delivery?.otherContext).toMatchObject({ ragTokens: 0, longTermMemoryTokens: otherTokens, cutBy: 'prompt_engine_truncate' });
@@ -237,12 +247,48 @@ describe('the memory block beside a host long-term-memory retriever, through pro
 
     const request = lastRequest(model);
     expect(request).toContain(question);
-    expect(request).not.toContain('Profile line 19');
+    expect(request).not.toContain('Profile line 64');
     expect(request).not.toContain('…[cut]');
     const block = blockIn(model);
     expect(tokensOf(block)).toBeLessThanOrEqual(record.budget.effective);
     const included = record.candidates.filter((c) => c.outcome === 'included');
     expect(included.length).toBeGreaterThan(0);
     for (const c of included) expect(block).toContain(manager.getStore().getTrace(c.id)!.content);
+  });
+
+  it("a long question leaves the block less of the model's context than the share does: the block is rendered again in what is left, and the request stays within the context", async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    // 8,000 tokens of context and no long-term-memory text: the share is 1,600, the whole configured budget. The
+    // question is about 7,300 tokens, which nothing reduces, so about 600 tokens of the context are left for the block,
+    // under the block the twelve notes fill at 1,600.
+    const filler = Array.from({ length: 273 }, (_, i) => `Background paragraph ${i}: the island ferry leaves its pier and the ticket desk opens before each crossing.`).join(' ');
+    const question = `Which pier does the island harbor ferry leave from? ${filler}`;
+    expect(tokensOf(question)).toBeGreaterThan(7_250);
+    expect(tokensOf(question)).toBeLessThan(7_350);
+    const { agentos, model, manager } = await boot(8_000, retrieverOf(''));
+    for (const statement of STATEMENTS) await turn(agentos, model, statement, 'Noted.');
+    const final = await turn(agentos, model, question, 'Pier 3.');
+
+    const record = final.memoryRecall as MemoryRecallCapture;
+    expect(record.budget).toMatchObject({ requested: 1600, clampReason: 'fixed_prompt', promptShareTokens: 1600, otherContextTokens: 0, hop: 0, reassembled: true });
+    const fixed = record.budget.fixedPromptTokens!;
+    expect(fixed).toBeGreaterThan(tokensOf(question));
+    expect(record.budget.effective).toBe(8_000 - fixed);
+    expect(record.budget.effective).toBeGreaterThan(300);
+    expect(record.tokensUsed).toBeLessThanOrEqual(record.budget.effective);
+    // PromptEngine's count of the prompt is within the model's budget: the record carries no over-budget warning.
+    expect(record.delivery).toEqual({ memoryBlockTokens: expect.any(Number) });
+
+    // The request the model received: the question whole, the block within its budget, and all of it within the
+    // model's context by the estimate of about four characters a token.
+    const request = model.seen.at(-1)!;
+    expect(lastRequest(model)).toContain(question);
+    const block = blockIn(model);
+    expect(tokensOf(block)).toBeLessThanOrEqual(record.budget.effective);
+    expect(request.messages.flatMap(textPartsOf).reduce((sum, text) => sum + tokensOf(text), 0)).toBeLessThanOrEqual(8_000);
+    const included = record.candidates.filter((c) => c.outcome === 'included');
+    expect(included.length).toBeGreaterThan(0);
+    for (const c of included) expect(block).toContain(manager.getStore().getTrace(c.id)!.content);
+    expect(lastRequest(model)).not.toContain('…[cut]');
   });
 });

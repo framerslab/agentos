@@ -3,8 +3,9 @@
  * The memory block on a model whose context is small, through the real GMI, PromptEngine and memory bridge over a
  * CognitiveMemoryManager built by `createAgentCognitiveMemory` (in-memory stores, a deterministic word-hash
  * embedding): the block's budget is clamped to what the model's retrieved-context share leaves after the turn's
- * long-term-memory text, the block is re-rendered at that remainder, PromptEngine never reduces the block, and the
- * turn's recall record names the clamp and what reached the model.
+ * long-term-memory text, and to what the prompt's fixed parts leave of the model's context, the block is re-rendered
+ * at that remainder, PromptEngine never reduces the block, and the turn's recall record names the clamp and what
+ * reached the model.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createAgentCognitiveMemory, type AgentCognitiveMemory } from '../../../api/runtime/agentCognitiveMemory';
@@ -49,13 +50,17 @@ const FERRY = Array.from(
   (_, i) => `Island ferry note ${i}: the island ferry leaves pier ${i + 3} at ${6 + i}:15, and the ticket desk beside that pier opens forty minutes before each crossing.`,
 );
 
-/** A memory holding the ferry notes. */
+/** A memory holding the ferry notes, its block set to 1,600 tokens with the retrieval and rerank it runs beside. */
 async function ferryMemory(): Promise<AgentCognitiveMemory> {
   const persona = {
     id: 'memo', name: 'Memo', description: 'd', version: '1.0.0', baseSystemPrompt: 'x',
     personalityTraits: { conscientiousness: 0.9, openness: 0.2, emotionality: 0.2 },
   } as never;
-  const mem = await createAgentCognitiveMemory({ persona, memory: {}, embeddingManager: makeEmbedder() as never });
+  const mem = await createAgentCognitiveMemory({
+    persona,
+    memory: { recall: { retrieval: 'dense', rerank: 'none', budget: { totalTokens: 1600 } } },
+    embeddingManager: makeEmbedder() as never,
+  });
   for (const note of FERRY) await mem.manager.encode(note, neutral, 'neutral', { type: 'episodic' });
   return mem;
 }
@@ -109,28 +114,98 @@ describe('GMI memory block on a small model', () => {
 
   it('a prompt over its budget keeps the memory block whole and reduces only the other context, named in the capture', async () => {
     mem = await ferryMemory();
-    // 4,000 tokens of context: the share is 800. About 280 tokens of long-term-memory text leave about 520 for memory.
-    // The question itself is about 3,500 tokens, which PromptEngine never reduces, so the prompt is over its budget and
-    // the long-term-memory text is reduced; every included memory line still reaches the model whole.
-    const longTerm = Array.from({ length: 20 }, (_, i) => `Profile line ${i}: the learner prefers morning crossings.`).join('\n');
+    // 8,000 tokens of context: the share is 1,600. About 1,120 tokens of long-term-memory text leave about 480 for
+    // memory. The question itself is about 6,800 tokens, which PromptEngine never reduces: it leaves the block more of
+    // the context than the share does, so the share sizes the block, and with the block and the long-term-memory text
+    // the prompt is over its budget. The long-term-memory text is reduced; every included memory line still reaches
+    // the model whole.
+    const longTerm = Array.from({ length: 80 }, (_, i) => `Profile line ${i}: the learner prefers morning crossings.`).join('\n');
     const otherTokens = tokensOf(longTerm);
-    const filler = Array.from({ length: 140 }, (_, i) => `Background paragraph ${i}: the island ferry leaves its pier and the ticket desk opens before each crossing.`).join(' ');
+    expect(otherTokens).toBeGreaterThan(1_080);
+    expect(otherTokens).toBeLessThan(1_160);
+    const filler = Array.from({ length: 255 }, (_, i) => `Background paragraph ${i}: the island ferry leaves its pier and the ticket desk opens before each crossing.`).join(' ');
     const question = `Which pier does the island ferry leave from? ${filler}`;
-    expect(tokensOf(question)).toBeGreaterThan(3_400);
+    expect(tokensOf(question)).toBeGreaterThan(6_750);
+    expect(tokensOf(question)).toBeLessThan(6_850);
     const { provider, received } = scriptedProvider([textReply('Pier 3.')]);
-    const { gmi } = await createScriptedGmi({ provider, config: { cognitiveMemory: mem.manager.forSession(), llmProviderManager: smallWindowManager(provider, 4_000) } });
+    const { gmi } = await createScriptedGmi({ provider, config: { cognitiveMemory: mem.manager.forSession(), llmProviderManager: smallWindowManager(provider, 8_000) } });
     const { output } = await runTurn(gmi, textTurn('t1', question, { longTermMemoryContext: longTerm }));
     const capture = output.memoryRecall as MemoryRecallCapture;
-    expect(capture.budget).toMatchObject({ requested: 1600, effective: 800 - otherTokens, clampReason: 'prompt_share', hop: 0, reassembled: true });
+    expect(capture.budget).toMatchObject({ requested: 1600, effective: 1600 - otherTokens, clampReason: 'prompt_share', hop: 0, reassembled: true });
+    // What the fixed parts leave of the context is more than the share's remainder, so it is not the bound here.
+    expect(8_000 - capture.budget.fixedPromptTokens!).toBeGreaterThanOrEqual(1600 - otherTokens);
     expect(capture.delivery!.otherContext!.cutBy).toBe('prompt_engine_truncate');
     expect(capture.delivery!.otherContext!.longTermMemoryTokens).toBe(otherTokens);
     expect(capture.delivery!.otherContext!.deliveredTokens).toBeLessThan(otherTokens);
     const prompt = JSON.stringify(received[0]);
-    expect(prompt).not.toContain('Profile line 19');
+    expect(prompt).not.toContain('Profile line 79');
     const included = capture.candidates.filter((candidate) => candidate.outcome === 'included');
     expect(included.length).toBeGreaterThan(0);
     for (const c of included) expect(prompt).toContain(mem.manager.getStore().getTrace(c.id)!.content);
     expect(prompt).not.toContain('…[cut]');
+  });
+
+  it("a turn whose fixed parts leave less of the model's context than the share does shrinks the memory block to what they leave, and the capture says why", async () => {
+    mem = await ferryMemory();
+    // 8,000 tokens of context: the share is 1,600, the whole configured budget, and the turn has no other context. The
+    // question is about 7,400 tokens, which PromptEngine never reduces, so beside it, the system prompt, the note's
+    // frame line and the tool schema, about 500 tokens of the context are left: the block is rendered again at that.
+    const filler = Array.from({ length: 278 }, (_, i) => `Background paragraph ${i}: the island ferry leaves its pier and the ticket desk opens before each crossing.`).join(' ');
+    const question = `Which pier does the island ferry leave from? ${filler}`;
+    expect(tokensOf(question)).toBeGreaterThan(7_400);
+    expect(tokensOf(question)).toBeLessThan(7_440);
+    const { provider, received } = scriptedProvider([textReply('Pier 3.')]);
+    const { gmi } = await createScriptedGmi({ provider, config: { cognitiveMemory: mem.manager.forSession(), llmProviderManager: smallWindowManager(provider, 8_000) } });
+    const { output } = await runTurn(gmi, textTurn('t1', question));
+    const capture = output.memoryRecall as MemoryRecallCapture;
+    expect(capture).toBeDefined();
+    expect(capture.budget).toMatchObject({ requested: 1600, clampReason: 'fixed_prompt', promptShareTokens: 1600, otherContextTokens: 0, hop: 0, reassembled: true });
+    const fixed = capture.budget.fixedPromptTokens!;
+    expect(fixed).toBeGreaterThan(tokensOf(question));
+    expect(fixed).toBeLessThan(tokensOf(question) + 200);
+    expect(capture.budget.effective).toBe(8_000 - fixed);
+    expect(capture.budget.effective).toBeGreaterThan(300);
+    expect(capture.tokensUsed).toBeLessThanOrEqual(capture.budget.effective);
+    // PromptEngine's count of the prompt is within the model's budget: the record carries no over-budget warning.
+    expect(capture.delivery).toEqual({ memoryBlockTokens: expect.any(Number) });
+    expect(capture.delivery!.memoryBlockTokens).toBeLessThanOrEqual(capture.budget.effective);
+    const prompt = JSON.stringify(received[0]);
+    const included = capture.candidates.filter((candidate) => candidate.outcome === 'included');
+    expect(included.length).toBeGreaterThan(0);
+    for (const c of included) expect(prompt).toContain(mem.manager.getStore().getTrace(c.id)!.content);
+    expect(prompt).not.toContain('…[cut]');
+  });
+
+  it("on a model id PromptEngine counts with fewer characters a token than the assembler, the block PromptEngine counts still fits what the fixed parts leave", async () => {
+    mem = await ferryMemory();
+    // gpt-4o-mini: PromptEngine counts 3.8 characters a token and the assembler 4, so a block of 1,000 of the
+    // assembler's tokens (4,000 characters) reads 1,053 by PromptEngine's count. On 8,000 tokens of context a question
+    // of about 7,400 of PromptEngine's tokens leaves about 500, and the block's budget is what holds 500 by that count.
+    const engineTokensOf = (text: string) => Math.ceil(text.length / 3.8);
+    const filler = Array.from({ length: 264 }, (_, i) => `Background paragraph ${i}: the island ferry leaves its pier and the ticket desk opens before each crossing.`).join(' ');
+    const question = `Which pier does the island ferry leave from? ${filler}`;
+    expect(engineTokensOf(question)).toBeGreaterThan(7_400);
+    expect(engineTokensOf(question)).toBeLessThan(7_440);
+    const { provider } = scriptedProvider([textReply('Pier 3.')]);
+    const { gmi } = await createScriptedGmi({
+      provider,
+      persona: { defaultModelId: 'gpt-4o-mini' },
+      config: { cognitiveMemory: mem.manager.forSession(), llmProviderManager: smallWindowManager(provider, 8_000) },
+    });
+    const { output } = await runTurn(gmi, textTurn('t1', question));
+    const capture = output.memoryRecall as MemoryRecallCapture;
+    expect(capture).toBeDefined();
+    expect(capture.budget).toMatchObject({ requested: 1600, clampReason: 'fixed_prompt', promptShareTokens: 1600, otherContextTokens: 0, hop: 0, reassembled: true });
+    const left = 8_000 - capture.budget.fixedPromptTokens!;
+    expect(left).toBeGreaterThan(300);
+    expect(left).toBeLessThan(700);
+    expect(capture.budget.blockTokenRate).toBe(1.053);
+    expect(capture.budget.effective).toBe(Math.floor(left / 1.053));
+    expect(capture.tokensUsed).toBeLessThanOrEqual(capture.budget.effective);
+    // PromptEngine's own count of the block is within what the fixed parts left, and of the prompt within its budget.
+    expect(capture.delivery).toEqual({ memoryBlockTokens: expect.any(Number) });
+    expect(capture.delivery!.memoryBlockTokens).toBeGreaterThan(0);
+    expect(capture.delivery!.memoryBlockTokens).toBeLessThanOrEqual(left);
   });
 
   it('a re-render that fails sends the model no block, and the record says the render failed, not that the budget left the memories out', async () => {
@@ -203,7 +278,12 @@ describe('GMI memory block on a small model', () => {
     const { output } = await runTurn(gmi, textTurn('t1', 'Which pier does the island ferry leave from?'));
     const capture = output.memoryRecall as MemoryRecallCapture;
     expect(reassemble).not.toHaveBeenCalled();
-    expect(capture.budget).toEqual({ requested: 1600, effective: 1600, promptShareTokens: 25_600, otherContextTokens: 0, hop: 0 });
+    // The record carries the count of the prompt's fixed parts: the system prompt, the question, the note's frame line
+    // and the tool schema, a few dozen tokens here.
+    // No rate: PromptEngine counts this model id's tokens as the assembler does.
+    expect(capture.budget).toEqual({ requested: 1600, effective: 1600, promptShareTokens: 25_600, otherContextTokens: 0, fixedPromptTokens: expect.any(Number), hop: 0 });
+    expect(capture.budget.fixedPromptTokens).toBeGreaterThan(0);
+    expect(capture.budget.fixedPromptTokens).toBeLessThan(200);
     expect(capture.delivery).toEqual({ memoryBlockTokens: expect.any(Number) });
     expect(JSON.stringify(received[0])).toContain('How To Use Your Memories');
   });

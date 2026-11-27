@@ -147,6 +147,12 @@ function memoryBlockOf(s: ProviderScript, call: number): string {
 /** Tokens of a text by the assembler's estimate (about four characters a token). */
 const tokensOf = (text: string) => Math.ceil(text.length / 4);
 
+/** Tokens of the text a provider request carries, by the same estimate: each text part of each message, and the tool schemas. */
+function requestTokensOf(request: ProviderScript['seen'][number]): number {
+  const tools = request.options.tools;
+  return request.messages.flatMap(textPartsOf).reduce((sum, text) => sum + tokensOf(text), 0) + (tools ? tokensOf(JSON.stringify(tools)) : 0);
+}
+
 const logged: Record<string, unknown>[] = [];
 /** The lines written with the event `name`. */
 const events = (name: string) => logged.filter((line) => line.event === name);
@@ -175,21 +181,48 @@ const STATEMENTS = [...FACTS, ...FILLER];
 const FILING_STARTS_AT = Date.UTC(2026, 10, 10, 12, 0, 0);
 
 /**
+ * Statements of about 390 tokens each, every one with words of its own: a recall's 20 candidates fill more than 6,400
+ * tokens, so the block is as large as its budget lets it be.
+ */
+const LONG_NOTES = Array.from(
+  { length: 24 },
+  (_, i) =>
+    `Bike shed log b${i}: ` +
+    Array.from({ length: 14 }, (_, j) => `On visit v${i}n${j} the bike shed door was checked, the code pad was wiped and shelf s${i}x${j} of the shed was sorted.`).join(' '),
+);
+const LONG_STATEMENTS = [GOLD, ...LONG_NOTES];
+/** Instructions of 26,500 tokens (106,000 characters), as an agent with a long manual in its system prompt has. */
+const MANUAL = Array.from({ length: 1200 }, (_, i) => `Rule ${i}: keep every answer short, name the shelf a thing is on, and never guess a code that was not given.`)
+  .join('\n')
+  .slice(0, 106_000);
+
+/** What an ask may set beside the recall setting. */
+interface AskOptions {
+  /** The statements the first agent files. Default {@link STATEMENTS}. */
+  statements?: readonly string[];
+  /** The context size the provider reports for the model. Default the stub's 128,000. */
+  window?: number;
+  /** The second agent's instructions. Default none. */
+  instructions?: string;
+}
+
+/**
  * Files the statements through the sends of one agent's session, closes the agent, and asks `question` in the same
  * session id of a second agent built on the same store. Returns the question's memory block as the provider received
- * it, the embedding requests of the question's turn, and the turn's recall record.
+ * it, the provider request that carried it, the embedding requests of the question's turn, and the turn's recall record.
  */
-async function askAfterRestart(db: OpenStore, recall: MemoryRecallConfig | undefined, question: string) {
+async function askAfterRestart(db: OpenStore, recall: MemoryRecallConfig | undefined, question: string, o: AskOptions = {}) {
+  const statements = o.statements ?? STATEMENTS;
   ids.next = 0;
   // Under a faked clock every ask starts at the same instant, so two asks file and read at the same times.
   if (vi.isFakeTimers()) vi.setSystemTime(FILING_STARTS_AT);
   const k = key();
   const emb = key();
   // One script for both agents: the provider's requests are counted on from the first agent's.
-  const s = script('openai', k, { replies: [...STATEMENTS.map(() => reply.text('Noted.')), reply.text('XQ7Z.')] });
+  const s = script('openai', k, { ...(o.window ? { window: o.window } : {}), replies: [...statements.map(() => reply.text('Noted.')), reply.text('XQ7Z.')] });
   const embedder = script('openai', emb, { replies: [] });
   vi.stubEnv('OPENAI_API_KEY', emb);
-  const build = async () => {
+  const build = async (instructions?: string) => {
     // Typed as a host writes it: no cast on the memory option or its recall setting.
     const memory: MemoryConfig = { embedding: { provider: 'openai' }, store: await db.store(), ...(recall ? { recall } : {}) };
     // The memory config whole under cognition.memory, and durable memory's key under learning. Named, so the persona
@@ -197,6 +230,7 @@ async function askAfterRestart(db: OpenStore, recall: MemoryRecallConfig | undef
     return agent({
       runtime: 'gmi',
       name: 'Shed',
+      ...(instructions ? { instructions } : {}),
       provider: 'openai',
       model: 'stub-model',
       apiKey: k,
@@ -209,18 +243,19 @@ async function askAfterRestart(db: OpenStore, recall: MemoryRecallConfig | undef
   const writer = await build();
   try {
     const filing = writer.session('user-1');
-    for (const statement of STATEMENTS) await filing.send(statement);
+    for (const statement of statements) await filing.send(statement);
   } finally {
     await writer.close();
   }
 
-  const reader = await build();
+  const reader = await build(o.instructions);
   try {
     const before = embedder.embedCalls;
     const result = await reader.session('user-1').send(question);
     return {
       text: result.text,
-      block: memoryBlockOf(s, STATEMENTS.length),
+      block: memoryBlockOf(s, statements.length),
+      request: s.seen[statements.length],
       embedCalls: embedder.embedCalls - before,
       memoryRecall: result.memoryRecall as MemoryRecallCapture | undefined,
     };
@@ -309,7 +344,7 @@ describe.each(ENGINES)("agent({ runtime: 'gmi' }) memory.recall over a durable s
     }
   });
 
-  it('the defaults as a set: no memory.recall sends, byte for byte, the block of dense, no rerank, 1,600 tokens and a metadata capture', async () => {
+  it('the defaults as a set: no memory.recall sends, byte for byte, the block of dense, no rerank, 6,400 tokens and a metadata capture', async () => {
     // A faked clock, so both blocks print the same ages: it stands still but for the millisecond each new memory
     // moves it on (the uuid mock above).
     vi.useFakeTimers({ toFake: ['Date'], shouldAdvanceTime: false });
@@ -318,7 +353,7 @@ describe.each(ENGINES)("agent({ runtime: 'gmi' }) memory.recall over a durable s
     const b = await open();
     try {
       const unset = await askAfterRestart(a, undefined, 'What is the bike shed code?');
-      const explicit = await askAfterRestart(b, { budget: { totalTokens: 1600 }, retrieval: 'dense', rerank: 'none', capture: 'metadata' }, 'What is the bike shed code?');
+      const explicit = await askAfterRestart(b, { budget: { totalTokens: 6400 }, retrieval: 'dense', rerank: 'none', capture: 'metadata' }, 'What is the bike shed code?');
       expect(unset.block).toContain(GOLD);
       expect(explicit.block).toBe(unset.block);
       expect(explicit.embedCalls).toBe(unset.embedCalls);
@@ -328,13 +363,120 @@ describe.each(ENGINES)("agent({ runtime: 'gmi' }) memory.recall over a durable s
           lexicalBackend: 'none',
           reranker: { provider: 'none', reason: 'none_configured' },
           memoryQuestionReserve: { fired: false, added: 0 },
-          budget: { requested: 1600 },
+          budget: { requested: 6400 },
         });
         expect(record!.legs.map((l) => l.leg)).toEqual(['dense']);
       }
     } finally {
       await a.close();
       await b.close();
+    }
+  });
+
+  it('the earlier defaults as a setting: dense, no rerank and 1,600 tokens send, byte for byte, the block a budget of 1,600 alone sends', async () => {
+    // The selection a memory with no recall setting ran before the default budget was 6,400.
+    vi.useFakeTimers({ toFake: ['Date'], shouldAdvanceTime: false });
+    vi.setSystemTime(FILING_STARTS_AT);
+    const a = await open();
+    const b = await open();
+    try {
+      const budgetAlone = await askAfterRestart(a, { budget: { totalTokens: 1600 } }, 'What is the bike shed code?');
+      const explicit = await askAfterRestart(b, { budget: { totalTokens: 1600 }, retrieval: 'dense', rerank: 'none', capture: 'metadata' }, 'What is the bike shed code?');
+      expect(explicit.block).toContain(GOLD);
+      expect(explicit.block).toBe(budgetAlone.block);
+      expect(explicit.embedCalls).toBe(budgetAlone.embedCalls);
+      expect(tokensOf(explicit.block)).toBeLessThanOrEqual(1600);
+      for (const record of [budgetAlone.memoryRecall, explicit.memoryRecall]) {
+        expect(record).toMatchObject({
+          retrieval: 'dense',
+          lexicalBackend: 'none',
+          reranker: { provider: 'none', reason: 'none_configured' },
+          memoryQuestionReserve: { fired: false, added: 0 },
+          budget: { requested: 1600 },
+        });
+        expect(record!.tokensUsed).toBeLessThanOrEqual(1600);
+        expect(record!.legs.map((l) => l.leg)).toEqual(['dense']);
+      }
+    } finally {
+      await a.close();
+      await b.close();
+    }
+  });
+
+  it('with no recall setting the turn reads the frozen defaults, and its block holds more than 1,600 tokens: memories a 1,600-token block leaves out', async () => {
+    // A model of 32,000 tokens of context, whose retrieved-context share holds the whole default, and a recall whose
+    // candidates fill more than 6,400 tokens.
+    const WINDOW = 32_000;
+    const a = await open();
+    const b = await open();
+    try {
+      const unset = await askAfterRestart(a, undefined, 'What is the bike shed code?', { statements: LONG_STATEMENTS, window: WINDOW });
+      const earlier = await askAfterRestart(b, { budget: { totalTokens: 1600 } }, 'What is the bike shed code?', { statements: LONG_STATEMENTS, window: WINDOW });
+      const record = unset.memoryRecall!;
+      expect(record).toBeDefined();
+      expect(record.retrieval).toBe('dense');
+      expect(record.reranker.provider).toBe('none');
+      expect(record.budget).toMatchObject({ requested: 6400, effective: 6400, hop: 0 });
+      expect(record.budget.clampReason).toBeUndefined();
+
+      // The default sends more than the earlier default's 1,600 tokens, within its own 6,400.
+      expect(record.tokensUsed).toBeGreaterThan(1600);
+      expect(record.tokensUsed).toBeLessThanOrEqual(6400);
+      expect(tokensOf(unset.block)).toBeGreaterThan(1600);
+      expect(tokensOf(unset.block)).toBeLessThanOrEqual(6400);
+      expect(earlier.memoryRecall!.budget).toMatchObject({ requested: 1600, effective: 1600 });
+      expect(earlier.memoryRecall!.tokensUsed).toBeLessThanOrEqual(1600);
+      expect(tokensOf(earlier.block)).toBeLessThanOrEqual(1600);
+      expect(unset.block.length).toBeGreaterThan(earlier.block.length);
+
+      // Both blocks show the memory that answers; the default's shows memories the 1,600-token block left out.
+      expect(unset.block).toContain(GOLD);
+      expect(earlier.block).toContain(GOLD);
+      const shownIn = (block: string) => LONG_NOTES.filter((note) => block.includes(note));
+      expect(shownIn(unset.block).length).toBeGreaterThan(shownIn(earlier.block).length);
+      expect(shownIn(unset.block).some((note) => !earlier.block.includes(note))).toBe(true);
+    } finally {
+      await a.close();
+      await b.close();
+    }
+  });
+
+  it("a long system prompt on a 32,000-token model: the default block is capped by what the prompt's fixed parts leave, and the request fits the model's context", async () => {
+    // The system prompt and the question come to about 27,000 tokens, which no step of the prompt's budget reduces.
+    // Beside them a 1,600-token block fits the model's 32,000 tokens and a 6,400-token block does not.
+    const WINDOW = 32_000;
+    const db = await open();
+    try {
+      const out = await askAfterRestart(db, undefined, 'What is the bike shed code?', { statements: LONG_STATEMENTS, window: WINDOW, instructions: MANUAL });
+      expect(out.block).toContain(GOLD);
+      const sent = requestTokensOf(out.request);
+      const blockTokens = tokensOf(out.block);
+      const fixed = sent - blockTokens;
+      expect(fixed + 1600, 'the fixed parts and a 1,600-token block').toBeLessThanOrEqual(WINDOW);
+      expect(fixed + 6400, 'the fixed parts and a 6,400-token block').toBeGreaterThan(WINDOW);
+
+      // The request the model received fits its context.
+      expect(sent, `the request: ${fixed} tokens of fixed parts and a memory block of ${blockTokens}`).toBeLessThanOrEqual(WINDOW);
+
+      // The record names the cap: the budget is what the fixed parts left of the context, and the block was rendered
+      // again in it, from the turn's one recall.
+      const record = out.memoryRecall!;
+      expect(record).toBeDefined();
+      const budget = record.budget;
+      expect(budget).toMatchObject({ requested: 6400, clampReason: 'fixed_prompt', promptShareTokens: 6400, otherContextTokens: 0, hop: 0, reassembled: true });
+      expect(budget.fixedPromptTokens).toBeGreaterThan(25_600);
+      expect(budget.effective).toBe(WINDOW - budget.fixedPromptTokens!);
+      expect(budget.effective).toBeGreaterThan(1600);
+      expect(budget.effective).toBeLessThan(6400);
+      expect(record.tokensUsed).toBeLessThanOrEqual(budget.effective);
+      expect(blockTokens).toBeLessThanOrEqual(budget.effective);
+      // A block larger than the earlier default's still reached the model.
+      expect(blockTokens).toBeGreaterThan(1600);
+      // PromptEngine's own count of the prompt is within the model's budget.
+      expect(record.delivery?.issueCodes).toBeUndefined();
+      expect(events('memory.recall.budget_clamped')).toContainEqual(expect.objectContaining({ requested: 6400, effective: budget.effective, hop: 0, reason: 'fixed_prompt' }));
+    } finally {
+      await db.close();
     }
   });
 

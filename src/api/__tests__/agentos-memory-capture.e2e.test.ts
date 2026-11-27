@@ -161,7 +161,8 @@ describe('the recall capture on the runtime stream', () => {
 
   it("with recall.capture 'metadata+stream' the stream carries one memorySources update per turn and the final response its memoryRecall; recall.traceIds lists the ids in the trace entry", async () => {
     vi.spyOn(console, 'log').mockImplementation(() => undefined);
-    const agentos = await boot({ capture: 'metadata+stream', traceIds: true });
+    // A block of 1,600 tokens, written out with the retrieval and rerank it runs beside: the records below read it.
+    const agentos = await boot({ retrieval: 'dense', rerank: 'none', budget: { totalTokens: 1600 }, capture: 'metadata+stream', traceIds: true });
     await turn(agentos, 's-stream', SAID);
     const chunks = await turn(agentos, 's-stream', ASKED);
 
@@ -182,7 +183,9 @@ describe('the recall capture on the runtime stream', () => {
     expect(streamed.delivery).toBeUndefined();
     expect(final.memoryRecall).toEqual({
       ...streamed,
-      budget: { requested: 1600, effective: 1600, promptShareTokens: expect.any(Number), otherContextTokens: 0, hop: 0 },
+      // The persona's model id is one PromptEngine counts at 3.8 characters a token, so the record carries the rate
+      // the fixed parts' bound was divided by.
+      budget: { requested: 1600, effective: 1600, promptShareTokens: expect.any(Number), otherContextTokens: 0, fixedPromptTokens: expect.any(Number), blockTokenRate: 1.053, hop: 0 },
       delivery: { memoryBlockTokens: expect.any(Number) },
     });
     expect((final.memoryRecall as { delivery: { memoryBlockTokens: number } }).delivery.memoryBlockTokens).toBeGreaterThan(0);

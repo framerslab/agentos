@@ -63,7 +63,13 @@ import type { ChatMessage } from '../../core/llm/providers/IProvider';
 let n = 0;
 const key = () => `k-memory-capture-${++n}`;
 
-/** An agent whose sessions share cognitive memory (no mechanisms) that embeds through OpenAI. */
+/** What a memory with no recall setting ran while the default budget was 1,600 tokens, written out as a setting. */
+const EARLIER_DEFAULTS = { retrieval: 'dense', rerank: 'none', budget: { totalTokens: 1600 } } as const;
+
+/**
+ * An agent whose sessions share cognitive memory (no mechanisms) that embeds through OpenAI, with a memory block of
+ * 1,600 tokens and no `capture` set.
+ */
 const withMemory = (apiKey: string) =>
   agent({
     runtime: 'gmi',
@@ -71,7 +77,7 @@ const withMemory = (apiKey: string) =>
     model: 'stub-model',
     apiKey,
     fallbackProviders: [],
-    cognition: { memory: { embedding: { provider: 'openai' } }, mechanisms: false },
+    cognition: { memory: { embedding: { provider: 'openai' }, recall: EARLIER_DEFAULTS }, mechanisms: false },
   } as unknown as AgentOptions);
 
 function textOf(message: ChatMessage): string {

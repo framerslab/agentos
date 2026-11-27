@@ -12,6 +12,7 @@ import { createAgentCognitiveMemory } from '../../src/api/runtime/agentCognitive
 import { CognitiveMemoryBridge } from '../../src/cognition/substrate/CognitiveMemoryBridge.js';
 import { GMIMood } from '../../src/cognition/substrate/IGMI.js';
 import type { ICognitiveMemoryManager } from '../../src/cognition/memory/CognitiveMemoryManager.js';
+import type { MemoryRecallConfig } from '../../src/cognition/memory/core/config.js';
 import { effectiveRecallBudget } from '../../src/cognition/memory/retrieval/recall/budget.js';
 import { MEMORY_CUT_MARKER } from '../../src/cognition/memory/core/prompt/MemoryFormatters.js';
 import { resetLoggerFactory, setLogger } from '../../src/core/logging/loggerFactory.js';
@@ -44,12 +45,15 @@ function makeEmbedder() {
   };
 }
 
-function memoryWith() {
+/** What a memory with no recall setting ran while the default budget was 1,600 tokens, written out as a setting. */
+const EARLIER_DEFAULTS: MemoryRecallConfig = { retrieval: 'dense', rerank: 'none', budget: { totalTokens: 1600 } };
+
+function memoryWith(recall?: MemoryRecallConfig) {
   const persona = {
     id: 'memo', name: 'Memo', description: 'd', version: '1.0.0', baseSystemPrompt: 'x',
     personalityTraits: { conscientiousness: 0.9, openness: 0.2, emotionality: 0.2 },
   } as never;
-  return createAgentCognitiveMemory({ persona, memory: {}, embeddingManager: makeEmbedder() as never });
+  return createAgentCognitiveMemory({ persona, memory: recall ? { recall } : {}, embeddingManager: makeEmbedder() as never });
 }
 
 const neutral = { valence: 0, arousal: 0, dominance: 0 };
@@ -78,6 +82,40 @@ describe('effectiveRecallBudget', () => {
 
   it.each([Number.NaN, Number.POSITIVE_INFINITY, -1, 0])('a context size of %s skips the clamp and says so', (contextTokens) => {
     expect(effectiveRecallBudget({ totalTokens: 1600, contextTokens, otherContextTokens: 0 })).toEqual({ requested: 1600, effective: 1600, invalid: true });
+  });
+
+  it.each([
+    // The fixed parts leave the whole budget: the record carries their count and names no clamp.
+    [{ totalTokens: 6400, contextTokens: 32_000, otherContextTokens: 0, fixedPromptTokens: 2_000 }, { requested: 6400, effective: 6400, promptShareTokens: 6400, otherContextTokens: 0, fixedPromptTokens: 2_000 }],
+    // 27,000 tokens of fixed parts on a 32,000-token model leave 5,000, under the share's 6,400.
+    [{ totalTokens: 6400, contextTokens: 32_000, otherContextTokens: 0, fixedPromptTokens: 27_000 }, { requested: 6400, effective: 5000, clampReason: 'fixed_prompt', promptShareTokens: 6400, otherContextTokens: 0, fixedPromptTokens: 27_000 }],
+    // An explicit budget takes the same bound.
+    [{ totalTokens: 3000, contextTokens: 32_000, otherContextTokens: 0, fixedPromptTokens: 30_500 }, { requested: 3000, effective: 1500, clampReason: 'fixed_prompt', promptShareTokens: 6400, otherContextTokens: 0, fixedPromptTokens: 30_500 }],
+    // Both bounds are under the budget: the smaller one is the budget, and the reason names it.
+    [{ totalTokens: 6400, contextTokens: 32_000, otherContextTokens: 4_000, fixedPromptTokens: 27_000 }, { requested: 6400, effective: 2400, clampReason: 'prompt_share', promptShareTokens: 6400, otherContextTokens: 4_000, fixedPromptTokens: 27_000 }],
+    [{ totalTokens: 6400, contextTokens: 32_000, otherContextTokens: 1_000, fixedPromptTokens: 30_000 }, { requested: 6400, effective: 2000, clampReason: 'fixed_prompt', promptShareTokens: 6400, otherContextTokens: 1_000, fixedPromptTokens: 30_000 }],
+    // Fixed parts as large as the context, or larger, leave nothing.
+    [{ totalTokens: 6400, contextTokens: 32_000, otherContextTokens: 0, fixedPromptTokens: 32_000 }, { requested: 6400, effective: 0, clampReason: 'zero_remaining', promptShareTokens: 6400, otherContextTokens: 0, fixedPromptTokens: 32_000 }],
+    [{ totalTokens: 6400, contextTokens: 32_000, otherContextTokens: 0, fixedPromptTokens: 40_000 }, { requested: 6400, effective: 0, clampReason: 'zero_remaining', promptShareTokens: 6400, otherContextTokens: 0, fixedPromptTokens: 40_000 }],
+  ])("the prompt's fixed parts bound the budget too: %j", (input, expected) => expect(effectiveRecallBudget(input)).toEqual(expected));
+
+  it.each([
+    // 1,000 tokens are left, and the prompt engine counts 1.053 tokens for one of the block's: 949 of the block's fit.
+    [{ totalTokens: 6400, contextTokens: 32_000, otherContextTokens: 0, fixedPromptTokens: 31_000, blockTokenRate: 1.053 }, { requested: 6400, effective: 949, clampReason: 'fixed_prompt', promptShareTokens: 6400, otherContextTokens: 0, fixedPromptTokens: 31_000, blockTokenRate: 1.053 }],
+    // The rate is recorded wherever it is above 1, also when the fixed parts leave the whole budget.
+    [{ totalTokens: 6400, contextTokens: 32_000, otherContextTokens: 0, fixedPromptTokens: 2_000, blockTokenRate: 1.053 }, { requested: 6400, effective: 6400, promptShareTokens: 6400, otherContextTokens: 0, fixedPromptTokens: 2_000, blockTokenRate: 1.053 }],
+    // The share is not divided by it.
+    [{ totalTokens: 6400, contextTokens: 16_000, otherContextTokens: 0, fixedPromptTokens: 2_000, blockTokenRate: 1.053 }, { requested: 6400, effective: 3200, clampReason: 'prompt_share', promptShareTokens: 3200, otherContextTokens: 0, fixedPromptTokens: 2_000, blockTokenRate: 1.053 }],
+    // A rate of 1 or less, or one that is not a finite number, changes nothing and is not recorded: the block is never given more than what is left.
+    [{ totalTokens: 6400, contextTokens: 32_000, otherContextTokens: 0, fixedPromptTokens: 31_000, blockTokenRate: 0.953 }, { requested: 6400, effective: 1000, clampReason: 'fixed_prompt', promptShareTokens: 6400, otherContextTokens: 0, fixedPromptTokens: 31_000 }],
+    [{ totalTokens: 6400, contextTokens: 32_000, otherContextTokens: 0, fixedPromptTokens: 31_000, blockTokenRate: 1 }, { requested: 6400, effective: 1000, clampReason: 'fixed_prompt', promptShareTokens: 6400, otherContextTokens: 0, fixedPromptTokens: 31_000 }],
+    [{ totalTokens: 6400, contextTokens: 32_000, otherContextTokens: 0, fixedPromptTokens: 31_000, blockTokenRate: Number.NaN }, { requested: 6400, effective: 1000, clampReason: 'fixed_prompt', promptShareTokens: 6400, otherContextTokens: 0, fixedPromptTokens: 31_000 }],
+  ])("what the fixed parts leave is counted as the prompt engine counts the block: %j", (input, expected) => expect(effectiveRecallBudget(input)).toEqual(expected));
+
+  it("a count of the prompt's fixed parts that is not a finite number of at least 0 skips the clamp", () => {
+    for (const fixedPromptTokens of [Number.NaN, Number.POSITIVE_INFINITY, -1]) {
+      expect(effectiveRecallBudget({ totalTokens: 1600, contextTokens: 8_000, otherContextTokens: 0, fixedPromptTokens })).toEqual({ requested: 1600, effective: 1600, invalid: true });
+    }
   });
 
   it('a negative or unbounded other-context count skips the clamp', () => {
@@ -170,7 +208,8 @@ describe('CognitiveMemoryBridge.contextForHop', () => {
   it('a manager without reassembleForBudget is asked again through assembleForPrompt at the lower budget, with the same query and scopes', async () => {
     const calls: Array<{ query: string; budget: number; scopes: unknown }> = [];
     const custom = {
-      getConfig: () => ({ agentId: 'memo' }),
+      // The bridge asks for the manager's configured budget first: 1,600 here, as a setting.
+      getConfig: () => ({ agentId: 'memo', recall: EARLIER_DEFAULTS }),
       assembleForPrompt: async (query: string, budget: number, _mood: unknown, options: { scopes?: unknown }) => {
         calls.push({ query, budget, scopes: options.scopes });
         const text = 'x'.repeat(Math.min(1000, budget) * 4);
@@ -187,7 +226,7 @@ describe('CognitiveMemoryBridge.contextForHop', () => {
   });
 
   it('a hop whose share holds the block takes it as assembled; an invalid input skips the clamp with one line; a remainder of 0 sends no block with one line', async () => {
-    const mem = await memoryWith();
+    const mem = await memoryWith(EARLIER_DEFAULTS);
     try {
       for (let i = 0; i < 6; i++) await mem.manager.encode(`Trail journal entry ${i}: the overlook had the best view.`, neutral, 'neutral', { type: 'episodic' });
       const bridge = bridgeOver(mem.manager);

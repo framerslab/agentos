@@ -145,6 +145,57 @@ describe('PromptEngine memoryContextText', () => {
     expect(contextTokens(r)).toMatchObject({ otherBefore: 0, otherAfter: 0 });
   });
 
+  it('estimateFixedPromptTokens counts what the budget step never reduces: a memory text of the context less that count leaves the prompt within its budget', async () => {
+    // About 3,300 tokens of question on the 4,000-token model, with earlier history and other retrieved context, both
+    // of which the budget step reduces before it reports a prompt over its budget.
+    const userInput = 'Which crossing suits a morning ferry? '.repeat(330);
+    const conversationHistory = Array.from({ length: 30 }, (_, i) => ({
+      role: i % 2 === 0 ? 'user' : 'assistant',
+      content: `Earlier message ${i}: the harbor office lists another crossing for the island route.`,
+    }));
+    const components = { ...base, userInput, conversationHistory, retrievedContext: RAG_LONG };
+    const fixed = await engine.estimateFixedPromptTokens(components as never, SMALL, baseExecutionContext);
+    // The question, and beside it the system prompt and the frame line that opens the note a memory text is sent in.
+    const questionTokens = await engine.estimateTokenCount(userInput, SMALL.modelId);
+    expect(fixed).toBeGreaterThan(questionTokens);
+    expect(fixed).toBeLessThan(questionTokens + 100);
+    // The same count with no history and no other context: neither is a fixed part.
+    expect(await engine.estimateFixedPromptTokens({ ...base, userInput } as never, SMALL, baseExecutionContext)).toBe(fixed);
+
+    const room = 4000 - fixed;
+    expect(room).toBeGreaterThan(400);
+    // A text PromptEngine counts as `tokens` on this model (3.8 characters a token).
+    const memoryOf = (tokens: number) => 'm'.repeat(Math.floor(tokens * 3.8));
+    expect(await engine.estimateTokenCount(memoryOf(room), SMALL.modelId)).toBe(room);
+
+    const fits = await build({ ...components, memoryContextText: memoryOf(room) });
+    expect(fits.issues?.map((issue) => issue.code) ?? []).not.toContain('TOKEN_BUDGET_EXCEEDED_POST_OPT');
+    expect(JSON.stringify(fits.prompt)).toContain(memoryOf(room));
+    expect(contextTokens(fits)).toMatchObject({ memory: room, otherAfter: 0 });
+
+    // A memory text 40 tokens larger, more than the frame line's own count, takes the prompt over its budget.
+    const over = await build({ ...components, memoryContextText: memoryOf(room + 40) });
+    expect(over.issues?.map((issue) => issue.code)).toContain('TOKEN_BUDGET_EXCEEDED_POST_OPT');
+  });
+
+  it('estimateFixedPromptTokens counts the current turn\'s messages, the tools and the host\'s note, and leaves the history before the turn out', async () => {
+    const earlier = Array.from({ length: 6 }, (_, i) => ({ role: i % 2 === 0 ? 'user' : 'assistant', content: `Earlier message ${i}: the harbor office lists another crossing.` }));
+    const turn = [{ role: 'user', content: 'When does the ferry leave? '.repeat(40) }];
+    const count = (components: Record<string, unknown>) => engine.estimateFixedPromptTokens(components as never, SMALL, baseExecutionContext);
+    const system = { systemPrompts: base.systemPrompts };
+    const withTurn = await count({ ...system, conversationHistory: [...earlier, ...turn], currentTurnMessageCount: 1 });
+    // The turn's message and its five tokens of overhead, as the budget step counts a message.
+    const turnTokens = (await engine.estimateTokenCount(turn[0].content, SMALL.modelId)) + 5;
+    expect(withTurn).toBe((await count({ ...system, userInput: 'x' })) - 1 + turnTokens);
+    // The history before the turn changes nothing.
+    expect(await count({ ...system, conversationHistory: turn, currentTurnMessageCount: 1 })).toBe(withTurn);
+    // Each tool counts 50, as in the budget step.
+    expect(await count({ ...system, conversationHistory: turn, currentTurnMessageCount: 1, tools: [{ name: 'lookup' }, { name: 'route' }] })).toBe(withTurn + 100);
+    // The host's note counts with its frame line and the separator after it, in place of the frame line alone.
+    const withNote = await count({ ...system, conversationHistory: turn, currentTurnMessageCount: 1, applicationNote: 'The harbor is closed on Mondays.' });
+    expect(withNote).toBeGreaterThan(withTurn);
+  });
+
   it('a prompt over its budget whose other context fits beside the memory text leaves that context as it is and reports no cut', async () => {
     // About 4,000 tokens of question on a 4,000-token model: the prompt is a few hundred tokens over its budget, and
     // the share less the memory text and the overrun still holds the short retrieved context.
