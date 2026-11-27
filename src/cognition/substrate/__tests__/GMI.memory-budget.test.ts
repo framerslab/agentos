@@ -402,8 +402,10 @@ describe('GMI memory block beside the response format and passthrough parameters
     expect(sent[0].responseFormat).toEqual(responseFormat);
     const formatTokens = tokensOf(JSON.stringify(responseFormat));
     expect(formatTokens).toBeGreaterThan(7_300);
+    // Counted beside the tool schemas the turn offers, as the request carries both.
+    const toolTokens = Array.isArray(sent[0].tools) && sent[0].tools.length > 0 ? tokensOf(JSON.stringify(sent[0].tools)) : 0;
     const built = construct.mock.calls[0][0] as PromptComponents & { reservedTokens?: number };
-    expect(built.reservedTokens).toBe(formatTokens);
+    expect(built.reservedTokens).toBe(toolTokens + formatTokens);
     const capture = output.memoryRecall as MemoryRecallCapture;
     expect(capture.budget).toMatchObject({ requested: 1600, clampReason: 'fixed_prompt', promptShareTokens: 1600, otherContextTokens: 0, hop: 0 });
     expect(capture.budget.fixedPromptTokens).toBeGreaterThanOrEqual(formatTokens);

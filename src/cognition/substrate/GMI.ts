@@ -117,6 +117,22 @@ const FORWARDED_COMPLETION_OPTION_KEYS = [
 ] as const;
 
 /** The forwarded completion options `source` sets; unset keys are left out so a later layer can fill them. */
+/**
+ * A request option as JSON, for its token count.
+ *
+ * @param value - The option.
+ * @returns Its JSON; '' when it is unset, or JSON cannot write it (a cycle, a BigInt): the provider that sends it
+ *   decides what becomes of it, and it is counted as nothing.
+ */
+function jsonOrEmpty(value: unknown): string {
+  if (value === undefined || value === null) return '';
+  try {
+    return JSON.stringify(value) ?? '';
+  } catch {
+    return '';
+  }
+}
+
 function pickCompletionOptions(source: Record<string, unknown> | undefined): Partial<ModelCompletionOptions> {
   const picked: Record<string, unknown> = {};
   if (!source) return picked;
@@ -1159,14 +1175,22 @@ export class GMI implements IGMI {
    * after it is built, so the engine's budget step cannot count them: the tool schemas the request offers, as the
    * engine's estimate of their JSON, and the turn's response schema as the hop carries it: its instruction when the
    * hop's prompt carries the schema (a system message written in after the build), and its payload, as the engine's
-   * estimate of its JSON, when the hop's request carries the schema as a parameter. The GMI passes the count to the
-   * prompt build (`PromptComponents.reservedTokens`), which holds the prompt to the model's context less it, and adds
-   * it to the prompt's fixed parts for the memory block's budget ({@link fixedPromptPartsOf}).
+   * estimate of its JSON, when the hop's request carries the schema as a parameter. On a hop with no response schema
+   * the gateway lowers, the response format the turn forwards (`responseFormat`, a JSON schema it carries included) is
+   * sent as given and counted the same way. So are the passthrough parameters (`customModelParams`), whole: a provider
+   * writes them into its request last, as given, so their `tools` replace the tool schemas on the wire and their
+   * `response_format` replaces the response format or the schema's payload, and what they replace is not counted
+   * beside them. The GMI passes the count to the prompt build (`PromptComponents.reservedTokens`), which holds the
+   * prompt to the model's context less it, and adds it to the prompt's fixed parts for the memory block's budget
+   * ({@link fixedPromptPartsOf}).
    *
    * @param modelId - The hop's model.
    * @param tools - The tool schemas the hop's request carries ({@link toolsSentOn}); none when it carries none.
    * @param schemaInstruction - The response schema's instruction the hop's prompt is sent with, when it has one.
    * @param schemaPayload - The provider payload the hop's request carries the response schema in, when it has one.
+   * @param responseFormat - The response format the turn forwards, where the hop's request is sent it as given (no
+   *   response schema the gateway lowers in its place).
+   * @param passthrough - The passthrough parameters (`customModelParams`) the hop's request is sent with.
    * @returns The count, 0 when the request carries none of them; undefined when the engine has no
    *   `estimateTokenCount`, or its count failed or was not a finite number of at least 0 (one reasoning-trace
    *   warning), so the prompt is built with nothing reserved.
@@ -1176,17 +1200,28 @@ export class GMI implements IGMI {
     tools: ModelCompletionOptions['tools'],
     schemaInstruction: string | undefined,
     schemaPayload: Record<string, unknown> | undefined,
+    responseFormat: ModelCompletionOptions['responseFormat'] | undefined,
+    passthrough: ModelCompletionOptions['customModelParams'] | undefined,
   ): Promise<number | undefined> {
-    const hasTools = Array.isArray(tools) && tools.length > 0;
-    if (!hasTools && !schemaInstruction && !schemaPayload) return 0;
+    const passthroughJson = jsonOrEmpty(passthrough && typeof passthrough === 'object' && Object.keys(passthrough).length > 0 ? passthrough : undefined);
+    const passthroughSets = (key: string): boolean =>
+      passthroughJson !== '' && (passthrough as Record<string, unknown>)[key] !== undefined;
+    // What the passthrough parameters set replaces the option of the same wire name, so it is counted once, with them.
+    const sentTools = passthroughSets('tools') ? undefined : tools;
+    const hasTools = Array.isArray(sentTools) && sentTools.length > 0;
+    const sentPayload = passthroughSets('response_format') ? undefined : schemaPayload;
+    const formatJson = passthroughSets('response_format') ? '' : jsonOrEmpty(responseFormat);
+    if (!hasTools && !schemaInstruction && !sentPayload && !formatJson && !passthroughJson) return 0;
     const engine = this.promptEngine;
     if (typeof engine.estimateTokenCount !== 'function') return undefined;
     try {
-      const toolSchemaTokens = hasTools ? await engine.estimateTokenCount(JSON.stringify(tools), modelId) : 0;
+      const toolSchemaTokens = hasTools ? await engine.estimateTokenCount(JSON.stringify(sentTools), modelId) : 0;
       const schemaInstructionTokens = schemaInstruction ? await engine.estimateTokenCount(schemaInstruction, modelId) : 0;
       // The payload is sent beside the prompt, as the tool schemas are, and is counted as they are.
-      const schemaPayloadTokens = schemaPayload ? await engine.estimateTokenCount(JSON.stringify(schemaPayload), modelId) : 0;
-      const reserved = toolSchemaTokens + schemaInstructionTokens + schemaPayloadTokens;
+      const schemaPayloadTokens = sentPayload ? await engine.estimateTokenCount(JSON.stringify(sentPayload), modelId) : 0;
+      const formatTokens = formatJson ? await engine.estimateTokenCount(formatJson, modelId) : 0;
+      const passthroughTokens = passthroughJson ? await engine.estimateTokenCount(passthroughJson, modelId) : 0;
+      const reserved = toolSchemaTokens + schemaInstructionTokens + schemaPayloadTokens + formatTokens + passthroughTokens;
       if (typeof reserved === 'number' && Number.isFinite(reserved) && reserved >= 0) return reserved;
       this.addTraceEntry(ReasoningEntryType.WARNING, 'What the request carries beside its prompt was not counted as a number; the prompt is built with nothing reserved for it, and a memory block is sized by the prompt share alone.');
     } catch (error: unknown) {
@@ -1201,8 +1236,9 @@ export class GMI implements IGMI {
    * The parts of a hop's request that nothing reduces to fit the model, counted for the memory block's budget
    * ({@link effectiveRecallBudget}): the prompt's fixed parts as the prompt engine counts them
    * (`estimateFixedPromptTokens`: the system prompts, the current turn's messages, the note's frame line and the
-   * host's note), and what the request carries beside the prompt ({@link reservedTokensOf}: the tool schemas, and the
-   * turn's response schema as its instruction or its payload). With them, how many tokens the engine counts for one
+   * host's note), and what the request carries beside the prompt ({@link reservedTokensOf}: the tool schemas, the
+   * turn's response schema as its instruction or its payload, a forwarded response format and the passthrough
+   * parameters). With them, how many tokens the engine counts for one
    * of the block's own on this model: the block is rendered in the assembler's tokens, which the engine can count as
    * more.
    *
@@ -2545,11 +2581,16 @@ export class GMI implements IGMI {
           // Counted on every request of the turn, a tool continuation's and a fallback hop's included: the prompt is
           // built with these tokens taken off its budget, so the earlier history and the other retrieved context are
           // kept only where the request has room for them, and the memory block is sized beside them.
+          // The options as this hop is sent them: a fallback entry's replace the turn's. A response schema the gateway
+          // lowers replaces the forwarded response format.
+          const hopOptions = resolution ? { ...llmOptions, ...resolution.optionOverrides } : llmOptions;
           const hopReservedTokens = await this.reservedTokensOf(
             modelTargetInfo.modelId,
             this.toolsSentOn(resolution, responseSchema) ? llmOptions.tools : undefined,
             hopSchemaInstruction,
             hopSchemaPayload,
+            gateway && resolution && responseSchema ? undefined : hopOptions.responseFormat,
+            hopOptions.customModelParams,
           );
           const ragTokens = estimateMemoryTokens(augmentedContextFromRAG);
           const longTermMemoryTokens = estimateMemoryTokens(injectedLongTermMemoryContext);
@@ -2572,10 +2613,7 @@ export class GMI implements IGMI {
           const hopMemoryText = hopMemoryContext?.contextText;
           // Asked per hop: a fallback hop to another provider or model rebuilds the prompt for its own target, and
           // with the options the gateway sends that hop (a fallback entry's own `cache` replaces the turn's there).
-          const systemCacheMarker = systemCacheMarkerFor(
-            modelTargetInfo,
-            resolution ? { ...llmOptions, ...resolution.optionOverrides } : llmOptions,
-          );
+          const systemCacheMarker = systemCacheMarkerFor(modelTargetInfo, hopOptions);
           const hopComponents: PromptComponents = {
             ...promptComponents,
             ...(systemCacheMarker ? { systemCacheMarker } : {}),
