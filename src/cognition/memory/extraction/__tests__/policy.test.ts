@@ -196,6 +196,7 @@ describe('conversational extraction policy', () => {
     agentId: 'memory-policy-test',
     traits: {},
     moodProvider: () => ({ valence: 0, arousal: 0, dominance: 0 }),
+    featureDetectionStrategy: 'keyword',
     graph: { disabled: true },
     workingMemory: {} as memory.CognitiveMemoryConfig['workingMemory'],
     embeddingManager: {} as memory.CognitiveMemoryConfig['embeddingManager'],
