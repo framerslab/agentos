@@ -483,8 +483,12 @@ async function wireRequestOf(providerId: 'gemini' | 'anthropic', modelId: string
   return (provider as unknown as Builds).buildRequestPayload(modelId, request.messages, request.options, true);
 }
 
-/** A response schema of one field whose description is the timetable tool's: about 7,400 tokens of JSON. */
-const longAnswerSchema = () => z.object({ pier: z.string().describe(TIMETABLE_TOOL.description) });
+/** A response schema of 200 named fields: a payload of thousands of tokens on every provider that takes it. */
+function longAnswerSchema() {
+  const shape: Record<string, z.ZodString> = { pier: z.string() };
+  for (let i = 0; i < 200; i += 1) shape[`harbor_log_entry_for_crossing_${i}`] = z.string();
+  return z.object(shape);
+}
 
 describe('GMI request beside passthrough parameters on a hop whose provider strips them', () => {
   it.each([
@@ -514,7 +518,7 @@ describe('GMI request beside passthrough parameters on a hop whose provider stri
     const onWire = schemaOnWire(wire);
     expect(onWire, 'the schema on the wire').toBeDefined();
     const wireTokens = await promptEngine.estimateTokenCount(JSON.stringify(onWire), modelId);
-    expect(wireTokens).toBeGreaterThan(5_000);
+    expect(wireTokens, 'the schema on the wire').toBeGreaterThan(3_000);
 
     const built = construct.mock.calls[0][0] as PromptComponents & { reservedTokens?: number };
     expect(built.reservedTokens ?? 0, `the reservation, beside a schema of ${wireTokens} tokens on the wire`).toBeGreaterThanOrEqual(wireTokens);
