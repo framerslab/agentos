@@ -29,7 +29,6 @@ import {
   ContextualElementType,
   PromptEngineError,
   IPromptEngineUtilityAI,
-  TokenEstimator,
 } from './IPromptEngine';
 import { resolveCacheCapabilities } from './providers/model-cache-capabilities';
 import {
@@ -1227,12 +1226,12 @@ export class PromptEngine implements IPromptEngine {
               modifications.wasModified = true;
             } catch (e) {
               issues?.push({type: 'warning', code: 'HISTORY_SUMMARIZATION_FAILED', message: `History summarization failed: ${e instanceof Error ? e.message : String(e)}`});
-              reducedEarlier = this.truncateMessages([...earlier], earlierTarget, (content) => this.estimateTokenCount(content, modelInfo.modelId), minEarlierKept, sendsThinking);
+              reducedEarlier = await this.truncateMessages([...earlier], earlierTarget, modelInfo.modelId, minEarlierKept, sendsThinking);
               modifications.details!.truncatedComponents!.push('conversationHistory');
               modifications.wasModified = true;
             }
           } else {
-            reducedEarlier = this.truncateMessages([...earlier], earlierTarget, (content) => this.estimateTokenCount(content, modelInfo.modelId), minEarlierKept, sendsThinking);
+            reducedEarlier = await this.truncateMessages([...earlier], earlierTarget, modelInfo.modelId, minEarlierKept, sendsThinking);
             if (reducedEarlier.length < earlier.length) {
               modifications.details!.truncatedComponents!.push('conversationHistory');
               modifications.wasModified = true;
@@ -1425,43 +1424,33 @@ export class PromptEngine implements IPromptEngine {
 
   /**
    * Drops the oldest messages until the rest fit `targetTokenCount`, keeping
-   * at least `minKept`. Chat APIs reject a tool call without its result and a
+   * at least `minKept`. Each message is counted as the budget step counts it
+   * (`calculateTokensForMessages`: the model's rate, the thinking the target
+   * receives with it and the per-message overhead), so what is kept measures
+   * within the target. Chat APIs reject a tool call without its result and a
    * tool result without its call, so a tool round (an assistant message that
    * names tool calls, the tool messages that answer them and anything between)
    * is dropped whole or kept whole: when dropping it would leave fewer than
    * `minKept` messages, it stays, over the budget. A tool result left first
    * with no call before it in `messages` goes too.
    */
-  private truncateMessages(
+  private async truncateMessages(
     messages: Message[],
     targetTokenCount: number,
-    _estimateFn: TokenEstimator,
+    modelId: string,
     minKept = 1,
     sendsThinking: (msg: Message) => boolean = () => false,
-  ): Message[] {
-    // Rough estimate: four characters a token, over the content and any
-    // thinking the target receives with the message.
-    const roughTokens = (msg: Message | undefined): number => {
-      if (!msg) return 0;
-      const contentChars = typeof msg.content === 'string'
-        ? msg.content.length
-        : (Array.isArray(msg.content) ? JSON.stringify(msg.content).length : 50);
-      const thinkingChars = sendsThinking(msg)
-        ? (msg.thinkingBlocks ?? []).reduce(
-            (chars, block) => chars + (block.type === 'thinking' ? block.thinking.length : block.data.length),
-            0,
-          )
-        : 0;
-      return (contentChars + thinkingChars) / 4;
-    };
-    let currentTokens = messages.reduce((sum, msg) => sum + roughTokens(msg), 0);
+  ): Promise<Message[]> {
+    const tokens: number[] = [];
+    for (const msg of messages) tokens.push(await this.calculateTokensForMessages([msg], modelId, sendsThinking));
+    let currentTokens = tokens.reduce((sum, count) => sum + count, 0);
     const rounds = toolRoundBounds(messages);
     // `first` is always the first message of a tool round or a message outside every round.
     let first = 0;
     while (currentTokens > targetTokenCount && first < messages.length) {
       const last = rounds.end[first];
       if (messages.length - (last + 1) < minKept) break;
-      for (let index = first; index <= last; index += 1) currentTokens -= roughTokens(messages[index]);
+      for (let index = first; index <= last; index += 1) currentTokens -= tokens[index];
       first = last + 1;
     }
     while (messages.length - first > minKept && messages[first]?.role === MessageRole.TOOL) {
