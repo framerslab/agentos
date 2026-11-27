@@ -1134,6 +1134,27 @@ export class GMI implements IGMI {
   }
 
   /**
+   * Whether a hop's request carries the turn's tool schemas. A request without a response schema does. One with a
+   * response schema does where the gateway says so (`toolsSentWithSchema`), or has no such method: the gateway of
+   * `createCompletionGateway` sends a response-schema request without tools and says so, and a gateway written before
+   * the method may send both. A GMI without a gateway sends the provider the turn's options as they are.
+   *
+   * @param resolution - The hop, when a completion gateway resolved one.
+   * @param responseSchema - The turn's response schema, when it has one.
+   * @returns Whether the tool schemas travel with the hop's request. A gateway whose answer throws counts as sending them.
+   */
+  private toolsSentOn(resolution: CompletionResolution | null, responseSchema: ZodType | undefined): boolean {
+    const gateway = this.config.completionGateway;
+    if (!gateway || !resolution || !responseSchema) return true;
+    try {
+      // A gateway without the method answers undefined, which counts as sending them.
+      return gateway.toolsSentWithSchema?.(resolution) !== false;
+    } catch {
+      return true;
+    }
+  }
+
+  /**
    * The tokens of what a hop's request carries beside the prompt the engine builds, or has written into that prompt
    * after it is built, so the engine's budget step cannot count them: the tool schemas the request offers, as the
    * engine's estimate of their JSON, and the turn's response schema as the hop carries it: its instruction when the
@@ -1143,7 +1164,7 @@ export class GMI implements IGMI {
    * it to the prompt's fixed parts for the memory block's budget ({@link fixedPromptPartsOf}).
    *
    * @param modelId - The hop's model.
-   * @param tools - The tool schemas the turn offers.
+   * @param tools - The tool schemas the hop's request carries ({@link toolsSentOn}); none when it carries none.
    * @param schemaInstruction - The response schema's instruction the hop's prompt is sent with, when it has one.
    * @param schemaPayload - The provider payload the hop's request carries the response schema in, when it has one.
    * @returns The count, 0 when the request carries none of them; undefined when the engine has no
@@ -2503,7 +2524,7 @@ export class GMI implements IGMI {
           let hopMemoryContext: AssembledMemoryContext | null = assembledMemoryContext;
           let hopCapture: MemoryRecallCapture | undefined = assembledMemoryContext?.capture;
           // What this hop's request carries beside the prompt PromptEngine builds, which PromptEngine cannot count: the
-          // tool schemas and the turn's response schema. The response schema's
+          // tool schemas, where the request carries them, and the turn's response schema. The response schema's
           // instruction, where this hop's prompt carries the schema, is sent as a system message after the prompt is
           // built. A lowering that throws here throws again below, where the instruction is written into the prompt.
           let hopSchemaInstruction: string | undefined;
@@ -2526,7 +2547,7 @@ export class GMI implements IGMI {
           // kept only where the request has room for them, and the memory block is sized beside them.
           const hopReservedTokens = await this.reservedTokensOf(
             modelTargetInfo.modelId,
-            llmOptions.tools,
+            this.toolsSentOn(resolution, responseSchema) ? llmOptions.tools : undefined,
             hopSchemaInstruction,
             hopSchemaPayload,
           );

@@ -278,6 +278,14 @@ export interface CompletionGateway {
    * counts its JSON with them.
    */
   schemaPayload?(resolution: CompletionResolution, responseSchema: ZodType, schemaName?: string): Record<string, unknown> | undefined;
+  /**
+   * Whether `stream()` sends a hop's request the caller's tools when the request has a response schema. The gateway
+   * of `createCompletionGateway` answers false: it sends such a request the schema and no tools. A caller that sizes
+   * a request for the model's context (the GMI, for a turn's memory block and its earlier history) counts the tool
+   * schemas on a response-schema turn only where this is true, or where the gateway has no such method: a gateway
+   * written before it may send both, so both are counted.
+   */
+  toolsSentWithSchema?(resolution: CompletionResolution): boolean;
 }
 
 /** The tool format a provider expects; the same mapping as GMI.determineToolFormat. */
@@ -1077,5 +1085,10 @@ export function createCompletionGateway(defaults: Partial<CompletionRoute> = {})
     return responseFormatCarriesSchema(responseFormat) ? responseFormat : undefined;
   }
 
-  return { resolve, stream, schemaInstruction, schemaPayload };
+  /** A request with a response schema carries no tools: `stream()` clears `tools` and `toolChoice` on it, on every hop. */
+  function toolsSentWithSchema(): boolean {
+    return false;
+  }
+
+  return { resolve, stream, schemaInstruction, schemaPayload, toolsSentWithSchema };
 }
