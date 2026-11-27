@@ -210,6 +210,32 @@ function hostNoteAsSent(note: string, components: Readonly<PromptComponents>): s
 }
 
 /**
+ * The frame line of the note a prompt with no host note is sent with, for the token count: the line that opens the
+ * memory block or other retrieved text in the newest user message, with the newline after it. No count of the budget
+ * step's parts holds it (a host note is counted with its own frame, {@link hostNoteAsSent}), so the budget step takes
+ * it off the budget the prompt is held to, as `estimateFixedPromptTokens` counts it among the fixed parts.
+ *
+ * @param components - The prompt's components, before the budget step.
+ * @returns The text to count; '' when the prompt has a host note, or neither a memory block nor other retrieved text.
+ */
+function noteFrameAsSent(components: Readonly<PromptComponents>): string {
+  if (hostNoteOf(components)) return '';
+  const sendsNote = Boolean(components.memoryContextText) || Boolean(retrievedContextAsText(components.retrievedContext));
+  return sendsNote ? applicationNoteOf('') : '';
+}
+
+/**
+ * The tokens a prompt's caller reserved for what its request carries beside the prompt (`reservedTokens`).
+ *
+ * @param components - The prompt's components.
+ * @returns The reservation; 0 when it is unset, not a finite number, or not above 0.
+ */
+function reservedTokensOf(components: Readonly<PromptComponents>): number {
+  const reserved: unknown = components.reservedTokens;
+  return typeof reserved === 'number' && Number.isFinite(reserved) && reserved > 0 ? reserved : 0;
+}
+
+/**
  * The newest user message's content with the note in front of it. The person's words are never changed: no label
  * goes in front of them and nothing is trimmed.
  *
@@ -616,7 +642,8 @@ export class PromptEngine implements IPromptEngine {
    * tool round the turn's first message belongs to), the tools, and the application note as it is sent beside a memory
    * block: its frame line, the host's note when the turn has one, and the separators after it. With no turn message
    * and no `userInput`, the newest history message counts, with its tool round, since the budget step keeps it so that
-   * there is a message to send.
+   * there is a message to send. `reservedTokens`, what the request carries beside the prompt, is counted where the
+   * components carry it.
    *
    * The memory block, the other retrieved context and the history before the turn are not counted: the block is what
    * the caller sizes with this figure, and the other two are what the budget step reduces. A memory block of at most
@@ -656,7 +683,7 @@ export class PromptEngine implements IPromptEngine {
     const noteBesideBlock = hostNote
       ? hostNoteAsSent(hostNote, { ...components, memoryContextText: components.memoryContextText || ' ' })
       : applicationNoteOf('');
-    return partsTokens + await this.estimateTokenCount(noteBesideBlock, modelTargetInfo.modelId);
+    return partsTokens + (await this.estimateTokenCount(noteBesideBlock, modelTargetInfo.modelId)) + reservedTokensOf(components);
   }
 
   public async estimateTokenCount(content: string, modelId?: string): Promise<number> {
@@ -1098,6 +1125,11 @@ export class PromptEngine implements IPromptEngine {
      * Host note: `applicationNote` counts toward the prompt with the user's message, outside the rag share, and is never
      *  reduced; a prompt over the budget after the reductions goes out with it whole, with the
      *  `TOKEN_BUDGET_EXCEEDED_POST_OPT` warning.
+     * Reservation: the prompt is held to the budget less `reservedTokens` (what the request carries beside the prompt:
+     *  tool schemas, a response schema's payload, a message the caller adds after the build) and less the frame line
+     *  a prompt with no host note opens its memory block or retrieved text with, which no part's count holds. The
+     *  earlier history and `retrievedContext` are reduced to fit what is left; the shares above stay shares of the
+     *  model's whole budget.
      * Failure Handling: On summarization errors pushes warning issue & falls back to truncation.
      * Returns cloned optimized components plus modification descriptors for telemetry.
      */
@@ -1108,6 +1140,10 @@ export class PromptEngine implements IPromptEngine {
     };
 
     const budget = modelInfo.optimalContextTokens || modelInfo.maxContextTokens;
+    // What the prompt itself may hold: the budget less what the request carries beside it, and less the note's frame
+    // line where no part's count holds it.
+    const reservedTokens = reservedTokensOf(optimized);
+    const promptBudget = Math.max(0, budget - reservedTokens - await this.estimateTokenCount(noteFrameAsSent(optimized), modelInfo.modelId));
     const sendsThinking = this.thinkingSentFor(optimized.conversationHistory, modelInfo);
     let currentTokens = await this.calculateTotalTokens(optimized, modelInfo.modelId, sendsThinking);
     modifications.details!.originalEstimatedTokenCount = currentTokens;
@@ -1122,7 +1158,7 @@ export class PromptEngine implements IPromptEngine {
 
     if (optimized.conversationHistory && optimized.conversationHistory.length > 0) {
       const historyTokens = await this.calculateTokensForMessages(optimized.conversationHistory, modelInfo.modelId, sendsThinking);
-      if (historyTokens > budgets.history || currentTokens > budget) {
+      if (historyTokens > budgets.history || currentTokens > promptBudget) {
         // The turn being answered stays whole: summarizing or truncating it
         // would drop the request itself (a structured user message has no
         // userInput copy) or split a tool call from its result. A tool round
@@ -1138,7 +1174,7 @@ export class PromptEngine implements IPromptEngine {
         // The earlier history keeps its share of the history budget, and no
         // more than fits beside everything else in the prompt.
         const earlierBudget = Math.max(0, budgets.history - turnTokens);
-        const earlierTarget = Math.max(0, Math.min(earlierBudget, budget - (currentTokens - earlierTokens)));
+        const earlierTarget = Math.max(0, Math.min(earlierBudget, promptBudget - (currentTokens - earlierTokens)));
         // When the turn is kept, or the request travels as userInput, there
         // is always a message to send, so the earlier history may go
         // entirely.
@@ -1204,10 +1240,10 @@ export class PromptEngine implements IPromptEngine {
       const contextStr = typeof optimized.retrievedContext === 'string' ? optimized.retrievedContext : optimized.retrievedContext.map(r => r.content).join('\n');
       let ragTokens = await this.estimateTokenCount(contextStr, modelInfo.modelId);
       otherBefore = ragTokens;
-      if (ragTokens + memoryTokens > budgets.rag || currentTokens > budget) {
+      if (ragTokens + memoryTokens > budgets.rag || currentTokens > promptBudget) {
         // What the other context may keep: the share less the memory block, less the overrun when the prompt is over
         // its budget.
-        const target = Math.max(0, Math.floor(budgets.rag - memoryTokens - Math.max(0, currentTokens - budget)));
+        const target = Math.max(0, Math.floor(budgets.rag - memoryTokens - Math.max(0, currentTokens - promptBudget)));
         // A target the other context already fits leaves it as it is: nothing is cut, summarised or reported cut.
         if (target < ragTokens) {
           const retrievedBefore = optimized.retrievedContext;
@@ -1259,8 +1295,9 @@ export class PromptEngine implements IPromptEngine {
       otherAfter = ragTokens;
     }
 
-    if (currentTokens > budget && issues) {
-      issues.push({ type: 'warning', code: 'TOKEN_BUDGET_EXCEEDED_POST_OPT', message: `Prompt still exceeds budget (${currentTokens}/${budget}) after initial optimizations. Quality may be affected.`});
+    if (currentTokens > promptBudget && issues) {
+      const reservedNote = reservedTokens > 0 ? `; ${reservedTokens} of the model's ${budget} tokens are reserved for what the request carries beside the prompt` : '';
+      issues.push({ type: 'warning', code: 'TOKEN_BUDGET_EXCEEDED_POST_OPT', message: `Prompt still exceeds budget (${currentTokens}/${promptBudget}${reservedNote}) after initial optimizations. Quality may be affected.`});
     }
 
     return { optimizedComponents: optimized, modifications, contextTokens: { memory: memoryTokens, otherBefore, otherAfter } };

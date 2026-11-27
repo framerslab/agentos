@@ -187,6 +187,17 @@ export interface PromptComponents {
    * that does not read it sends no host note.
    */
   applicationNote?: string;
+  /**
+   * The tokens of what the request carries beside this prompt, or has written into it after it is built, so the
+   * engine cannot count them: tool schemas sent as a request parameter, a response schema's payload, a system message
+   * the caller adds to the built prompt. PromptEngine holds the prompt to the model's budget less this figure: it
+   * reduces the earlier history and `retrievedContext` to fit what is left, and writes the
+   * `TOKEN_BUDGET_EXCEEDED_POST_OPT` warning when the parts it never reduces are over it. The shares of the budget
+   * (history, retrieved context) stay shares of the model's whole budget. `estimateFixedPromptTokens` counts it, as a
+   * part nothing reduces. Unset, not a finite number, or not above 0, nothing is reserved. The GMI sets it per model
+   * hop, in the engine's own estimate (`estimateTokenCount`); an engine that does not read it reserves nothing.
+   */
+  reservedTokens?: number;
   /** Assembled cognitive memory context (personality-affected, token-budgeted). Not read by PromptEngine: the GMI passes its text as `memoryContextText`. */
   assembledMemoryContext?: import('../../cognition/memory/core/types.js').AssembledMemoryContext;
   /** Task-specific data or parameters that need to be included in the prompt. */
@@ -614,14 +625,16 @@ export interface IPromptEngine {
   /**
    * Estimates the tokens of the parts of a prompt that the engine never reduces to fit a model's budget, counted as
    * the engine counts them when it builds the prompt. For PromptEngine these are the system prompts, `userInput`, the
-   * current turn's messages, the tools and the application note beside a memory block; the memory block, the other
-   * retrieved context and the history before the turn are left out.
+   * current turn's messages, the tools, the application note beside a memory block (its frame line, and the host's
+   * note when the turn has one) and the components' `reservedTokens`; the memory block, the other retrieved context
+   * and the history before the turn are left out.
    *
-   * The GMI holds a turn's memory block to what this figure, the tool schemas it sends and a response schema's
-   * instruction it writes into the prompt leave of the model's context, since the block is never reduced either. It
-   * reads the engine's count of a block's token through `estimateTokenCount`, so the block fits there by this
-   * engine's count. An engine without the method gets no such bound: its block is sized by the model's
-   * retrieved-context share alone.
+   * The GMI holds a turn's memory block to what this figure and what the hop's request carries beside the prompt
+   * (the tool schemas it sends, and a response schema's instruction or payload) leave of the model's context, since
+   * the block is never reduced either. It calls the method with components that carry no `reservedTokens` and adds
+   * that count itself, then passes the count as `reservedTokens` when the prompt is built. It reads the engine's
+   * count of a block's token through `estimateTokenCount`, so the block fits there by this engine's count. An engine
+   * without the method gets no such bound: its block is sized by the model's retrieved-context share alone.
    *
    * @async
    * @param {Readonly<PromptComponents>} components - The prompt's components, as `constructPrompt` takes them.

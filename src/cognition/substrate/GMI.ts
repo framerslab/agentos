@@ -1134,43 +1134,78 @@ export class GMI implements IGMI {
   }
 
   /**
-   * The parts of a hop's request that nothing reduces to fit the model, counted for the memory block's budget
-   * ({@link effectiveRecallBudget}): the prompt's fixed parts as the prompt engine counts them
-   * (`estimateFixedPromptTokens`: the system prompts, the current turn's messages, the host's note), the tool schemas
-   * the turn offers beside the prompt, as the engine's estimate of their JSON, and the turn's response schema as the
-   * hop carries it: its instruction when the hop's prompt carries the schema, and its payload, as the engine's
-   * estimate of its JSON, when the hop's request carries the schema as a parameter. With them, how many tokens the
-   * engine counts for one of the block's own on this model: the block is rendered in the assembler's tokens, which the
-   * engine can count as more.
+   * The tokens of what a hop's request carries beside the prompt the engine builds, or has written into that prompt
+   * after it is built, so the engine's budget step cannot count them: the tool schemas the request offers, as the
+   * engine's estimate of their JSON, and the turn's response schema as the hop carries it: its instruction when the
+   * hop's prompt carries the schema (a system message written in after the build), and its payload, as the engine's
+   * estimate of its JSON, when the hop's request carries the schema as a parameter. The GMI passes the count to the
+   * prompt build (`PromptComponents.reservedTokens`), which holds the prompt to the model's context less it, and adds
+   * it to the prompt's fixed parts for the memory block's budget ({@link fixedPromptPartsOf}).
    *
-   * @param components - The turn's prompt components, without the hop's memory block.
-   * @param modelTargetInfo - The hop's model.
-   * @param executionContext - The turn's prompt execution context.
+   * @param modelId - The hop's model.
    * @param tools - The tool schemas the turn offers.
    * @param schemaInstruction - The response schema's instruction the hop's prompt is sent with, when it has one.
    * @param schemaPayload - The provider payload the hop's request carries the response schema in, when it has one.
-   * @returns The count and the rate; undefined when the engine has no `estimateFixedPromptTokens`, or its count failed
-   *   or was not a finite number of at least 0 (one reasoning-trace warning), so the block is sized by the prompt
-   *   share alone.
+   * @returns The count, 0 when the request carries none of them; undefined when the engine has no
+   *   `estimateTokenCount`, or its count failed or was not a finite number of at least 0 (one reasoning-trace
+   *   warning), so the prompt is built with nothing reserved.
+   */
+  private async reservedTokensOf(
+    modelId: string,
+    tools: ModelCompletionOptions['tools'],
+    schemaInstruction: string | undefined,
+    schemaPayload: Record<string, unknown> | undefined,
+  ): Promise<number | undefined> {
+    const hasTools = Array.isArray(tools) && tools.length > 0;
+    if (!hasTools && !schemaInstruction && !schemaPayload) return 0;
+    const engine = this.promptEngine;
+    if (typeof engine.estimateTokenCount !== 'function') return undefined;
+    try {
+      const toolSchemaTokens = hasTools ? await engine.estimateTokenCount(JSON.stringify(tools), modelId) : 0;
+      const schemaInstructionTokens = schemaInstruction ? await engine.estimateTokenCount(schemaInstruction, modelId) : 0;
+      // The payload is sent beside the prompt, as the tool schemas are, and is counted as they are.
+      const schemaPayloadTokens = schemaPayload ? await engine.estimateTokenCount(JSON.stringify(schemaPayload), modelId) : 0;
+      const reserved = toolSchemaTokens + schemaInstructionTokens + schemaPayloadTokens;
+      if (typeof reserved === 'number' && Number.isFinite(reserved) && reserved >= 0) return reserved;
+      this.addTraceEntry(ReasoningEntryType.WARNING, 'What the request carries beside its prompt was not counted as a number; the prompt is built with nothing reserved for it, and a memory block is sized by the prompt share alone.');
+    } catch (error: unknown) {
+      this.addTraceEntry(ReasoningEntryType.WARNING, 'Counting what the request carries beside its prompt failed; the prompt is built with nothing reserved for it, and a memory block is sized by the prompt share alone.', {
+        errorName: error instanceof Error ? error.name : typeof error,
+      });
+    }
+    return undefined;
+  }
+
+  /**
+   * The parts of a hop's request that nothing reduces to fit the model, counted for the memory block's budget
+   * ({@link effectiveRecallBudget}): the prompt's fixed parts as the prompt engine counts them
+   * (`estimateFixedPromptTokens`: the system prompts, the current turn's messages, the note's frame line and the
+   * host's note), and what the request carries beside the prompt ({@link reservedTokensOf}: the tool schemas, and the
+   * turn's response schema as its instruction or its payload). With them, how many tokens the engine counts for one
+   * of the block's own on this model: the block is rendered in the assembler's tokens, which the engine can count as
+   * more.
+   *
+   * @param components - The turn's prompt components, without the hop's memory block and with no `reservedTokens`.
+   * @param modelTargetInfo - The hop's model.
+   * @param executionContext - The turn's prompt execution context.
+   * @param reservedTokens - What the hop's request carries beside the prompt ({@link reservedTokensOf}); undefined
+   *   when that count failed.
+   * @returns The count and the rate; undefined when the engine has no `estimateFixedPromptTokens`, when
+   *   `reservedTokens` is undefined, or when the engine's count failed or was not a finite number of at least 0 (one
+   *   reasoning-trace warning), so the block is sized by the prompt share alone.
    */
   private async fixedPromptPartsOf(
     components: PromptComponents,
     modelTargetInfo: ModelTargetInfo,
     executionContext: PromptExecutionContext,
-    tools: ModelCompletionOptions['tools'],
-    schemaInstruction: string | undefined,
-    schemaPayload: Record<string, unknown> | undefined,
+    reservedTokens: number | undefined,
   ): Promise<{ fixedPromptTokens: number; blockTokenRate: number } | undefined> {
     const engine = this.promptEngine;
-    if (typeof engine.estimateFixedPromptTokens !== 'function') return undefined;
+    if (typeof engine.estimateFixedPromptTokens !== 'function' || reservedTokens === undefined) return undefined;
     try {
       const modelId = modelTargetInfo.modelId;
       const promptTokens = await engine.estimateFixedPromptTokens(components, modelTargetInfo, executionContext);
-      const toolSchemaTokens = tools && tools.length > 0 ? await engine.estimateTokenCount(JSON.stringify(tools), modelId) : 0;
-      const schemaInstructionTokens = schemaInstruction ? await engine.estimateTokenCount(schemaInstruction, modelId) : 0;
-      // The payload is sent beside the prompt, as the tool schemas are, and is counted as they are.
-      const schemaPayloadTokens = schemaPayload ? await engine.estimateTokenCount(JSON.stringify(schemaPayload), modelId) : 0;
-      const fixedPromptTokens = promptTokens + toolSchemaTokens + schemaInstructionTokens + schemaPayloadTokens;
+      const fixedPromptTokens = promptTokens + reservedTokens;
       const blockTokenRate = (await engine.estimateTokenCount(BLOCK_TOKEN_RATE_PROBE, modelId)) / estimateMemoryTokens(BLOCK_TOKEN_RATE_PROBE);
       if (typeof fixedPromptTokens === 'number' && Number.isFinite(fixedPromptTokens) && fixedPromptTokens >= 0) {
         return { fixedPromptTokens, blockTokenRate };
@@ -2467,30 +2502,39 @@ export class GMI implements IGMI {
           // the turn (tool continuations) assembled nothing and send no block.
           let hopMemoryContext: AssembledMemoryContext | null = assembledMemoryContext;
           let hopCapture: MemoryRecallCapture | undefined = assembledMemoryContext?.capture;
-          // The schema instruction of this hop, once it has been lowered for the memory block's budget.
+          // What this hop's request carries beside the prompt PromptEngine builds, which PromptEngine cannot count: the
+          // tool schemas and the turn's response schema. The response schema's
+          // instruction, where this hop's prompt carries the schema, is sent as a system message after the prompt is
+          // built. A lowering that throws here throws again below, where the instruction is written into the prompt.
           let hopSchemaInstruction: string | undefined;
+          try {
+            hopSchemaInstruction = this.schemaInstructionFor(resolution, responseSchema, schemaName, schemaInPrompt);
+          } catch {
+            hopSchemaInstruction = undefined;
+          }
+          // The schema's payload, where this hop's request carries the schema as a parameter, is sent beside the
+          // prompt, as the tool schemas are. A lowering that throws here throws again in the gateway, where the
+          // payload is built for the request.
+          let hopSchemaPayload: Record<string, unknown> | undefined;
+          try {
+            hopSchemaPayload = this.schemaPayloadFor(resolution, responseSchema, schemaName);
+          } catch {
+            hopSchemaPayload = undefined;
+          }
+          // Counted on every request of the turn, a tool continuation's and a fallback hop's included: the prompt is
+          // built with these tokens taken off its budget, so the earlier history and the other retrieved context are
+          // kept only where the request has room for them, and the memory block is sized beside them.
+          const hopReservedTokens = await this.reservedTokensOf(
+            modelTargetInfo.modelId,
+            llmOptions.tools,
+            hopSchemaInstruction,
+            hopSchemaPayload,
+          );
           const ragTokens = estimateMemoryTokens(augmentedContextFromRAG);
           const longTermMemoryTokens = estimateMemoryTokens(injectedLongTermMemoryContext);
           if (assembledMemoryContext && this.memoryBridge) {
             const hop = resolution?.hop ?? 0;
-            // The response schema's instruction, where this hop's prompt carries the schema, is sent as a system message
-            // after the prompt is built: it is a fixed part too. A lowering that throws here throws again below, where
-            // the instruction is written into the prompt.
-            try {
-              hopSchemaInstruction = this.schemaInstructionFor(resolution, responseSchema, schemaName, schemaInPrompt);
-            } catch {
-              hopSchemaInstruction = undefined;
-            }
-            // So is the schema's payload, where this hop's request carries the schema as a parameter: it is sent beside
-            // the prompt, as the tool schemas are. A lowering that throws here throws again in the gateway, where the
-            // payload is built for the request.
-            let hopSchemaPayload: Record<string, unknown> | undefined;
-            try {
-              hopSchemaPayload = this.schemaPayloadFor(resolution, responseSchema, schemaName);
-            } catch {
-              hopSchemaPayload = undefined;
-            }
-            const fixedParts = await this.fixedPromptPartsOf(promptComponents, modelTargetInfo, promptExecContext, llmOptions.tools, hopSchemaInstruction, hopSchemaPayload);
+            const fixedParts = await this.fixedPromptPartsOf(promptComponents, modelTargetInfo, promptExecContext, hopReservedTokens);
             const hopBudget = effectiveRecallBudget({
               totalTokens: this.memoryBridge.budgetTokens(),
               contextTokens: modelTargetInfo.optimalContextTokens || modelTargetInfo.maxContextTokens,
@@ -2520,6 +2564,7 @@ export class GMI implements IGMI {
                 : { retrievedContext: [hopMemoryText, promptComponents.retrievedContext].filter(Boolean).join("\n\n---\n\n") }
               : {}),
             ...(hopMemoryContext ? { assembledMemoryContext: hopMemoryContext } : {}),
+            ...(hopReservedTokens ? { reservedTokens: hopReservedTokens } : {}),
           };
 
           const promptEngineResult: PromptEngineResult = await this.promptEngine.constructPrompt(
