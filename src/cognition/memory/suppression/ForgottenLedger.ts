@@ -342,22 +342,37 @@ function nextMark(previous: string | undefined): string {
  * Runs one side's step in a transaction of its own whose first statement takes the table's write lock, so no other
  * writer changes the side between the step's reads and its commit. Every statement of the step runs on `trx`. A
  * step never opens the other side's transaction. A lock that is not taken (another connection holds it past the
- * wait the driver allows) is a `LEDGER_UNAVAILABLE` refusal, and the transaction ends with nothing written. On a
- * PostgreSQL adapter a souled agent keeps its store on, the transaction goes through the adapter's lock
- * (`withAdapterTransactionLock`), as the store's own transactions do.
+ * wait the driver allows) is a `LEDGER_UNAVAILABLE` refusal, and the transaction ends with nothing written. A driver
+ * that takes the write lock at its BEGIN (the better-sqlite3 adapter begins with BEGIN IMMEDIATE) refuses there,
+ * before the step's first statement; that refusal is the same `LEDGER_UNAVAILABLE`, and an error the step throws
+ * passes on unchanged. On a PostgreSQL adapter a souled agent keeps its store on, the transaction goes through the
+ * adapter's lock (`withAdapterTransactionLock`), as the store's own transactions do.
  */
 function locked<T>(adapter: StorageAdapter, step: (trx: StorageAdapter) => Promise<T>): Promise<T> {
   // On a souled agent's PostgreSQL store adapter, the transaction waits for the ones opened earlier on the same object.
-  return withAdapterTransactionLock(adapter, () =>
-    adapter.transaction(async (trx) => {
-      try {
-        await trx.run(adapter.kind.includes('postgres') ? LOCK_POSTGRES : LOCK_SQLITE);
-      } catch {
-        throw lockNotTaken();
-      }
-      return step(trx);
-    }),
-  );
+  return withAdapterTransactionLock(adapter, async () => {
+    let begun = false;
+    try {
+      return await adapter.transaction(async (trx) => {
+        begun = true;
+        try {
+          await trx.run(adapter.kind.includes('postgres') ? LOCK_POSTGRES : LOCK_SQLITE);
+        } catch {
+          throw lockNotTaken();
+        }
+        return step(trx);
+      });
+    } catch (error) {
+      if (!begun && isSqliteLockRefusal(error)) throw lockNotTaken();
+      throw error;
+    }
+  });
+}
+
+/** Whether a driver's error is SQLite refusing the write lock another connection holds (`SQLITE_BUSY`, `SQLITE_LOCKED`). */
+function isSqliteLockRefusal(error: unknown): boolean {
+  const code = (error as { code?: unknown } | null | undefined)?.code;
+  return typeof code === 'string' && (code.startsWith('SQLITE_BUSY') || code.startsWith('SQLITE_LOCKED'));
 }
 
 /** Whether two native SQLite connections name the same file, including links to it. */
