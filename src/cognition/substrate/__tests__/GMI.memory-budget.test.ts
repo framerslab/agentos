@@ -327,6 +327,28 @@ describe('GMI memory block on a small model', () => {
 });
 
 describe('GMI memory block on a response-schema turn of a persona with tools', () => {
+  it("a turn's passthrough parameters ride the request whole: tools a host passes there are counted and reserved, on a request the gateway sends without the turn's own tools", async () => {
+    mem = await ferryMemory();
+    // The gateway sends a response-schema request without the persona's tools, so they are not counted. The host
+    // passes the same tool through customModelParams, which a provider writes into its request as given.
+    const { gateway, sent } = hostGateway(8_000, '{"pier":"Pier 3"}', () => false);
+    const toolOrchestrator = { orchestratorId: 'timetable-tools', listAvailableTools: vi.fn(async () => [TIMETABLE_TOOL]), processToolCall: vi.fn() } as unknown as IToolOrchestrator;
+    const { gmi, promptEngine } = await createScriptedGmi({ gateway, config: { cognitiveMemory: mem.manager.forSession(), toolOrchestrator } });
+    const construct = vi.spyOn(promptEngine, 'constructPrompt');
+    const customModelParams = { tools: [{ type: 'function', function: { name: TIMETABLE_TOOL.name, description: TIMETABLE_TOOL.description, parameters: TIMETABLE_TOOL.inputSchema } }] };
+    const { output } = await runTurn(gmi, textTurn('t1', 'Which pier does the island ferry leave from?', { options: { responseSchema: z.object({ pier: z.string() }), schemaName: 'answer', customModelParams } } as never));
+    expect(sent).toHaveLength(1);
+    expect(sent[0].customModelParams).toEqual(customModelParams);
+    const passthroughTokens = tokensOf(JSON.stringify(customModelParams));
+    expect(passthroughTokens).toBeGreaterThan(7_300);
+    const built = construct.mock.calls[0][0] as PromptComponents & { reservedTokens?: number };
+    expect(built.reservedTokens).toBe(passthroughTokens);
+    const capture = output.memoryRecall as MemoryRecallCapture;
+    expect(capture.budget).toMatchObject({ requested: 1600, clampReason: 'fixed_prompt', promptShareTokens: 1600, otherContextTokens: 0, hop: 0 });
+    expect(capture.budget.fixedPromptTokens).toBeGreaterThanOrEqual(passthroughTokens);
+    expect(capture.budget.effective).toBe(8_000 - capture.budget.fixedPromptTokens!);
+  });
+
   it.each([
     { says: 'has no toolsSentWithSchema', toolsSentWithSchema: undefined, counted: true },
     { says: 'says a response-schema request keeps its tools', toolsSentWithSchema: () => true, counted: true },

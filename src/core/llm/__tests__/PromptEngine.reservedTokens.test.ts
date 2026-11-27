@@ -151,6 +151,21 @@ describe('PromptEngine reservedTokens', () => {
     expect(codes(reserved)).not.toContain('TOKEN_BUDGET_EXCEEDED_POST_OPT');
   });
 
+  it.each([
+    { share: 'the whole of its share', characters: 3_200 },
+    { share: 'half its share', characters: 1_600 },
+  ])('retrieved context of $share that is removed takes its note with it: a prompt whose remaining text fits the context writes no over-budget warning', async ({ characters }) => {
+    // A question of 3,985 tokens: with the system text, 3,990 of the 4,000, so no token of retrieved context fits
+    // beside the frame line its note would open with. Without the context no note is sent, and the prompt fits.
+    const question = 'Which crossing suits a morning ferry? '.repeat(420).slice(0, 15_940);
+    const built = await build({ ...base, userInput: question, retrievedContext: RETRIEVED.slice(0, characters) });
+    expect(built.modificationDetails?.removedComponents).toContain('retrievedContext');
+    expect((built.metadata.contextTokens as { otherAfter: number }).otherAfter).toBe(0);
+    expect(promptTokens(built)).toBe(3_990);
+    expect(JSON.stringify(built.prompt)).not.toContain('Note from the application');
+    expect(codes(built)).not.toContain('TOKEN_BUDGET_EXCEEDED_POST_OPT');
+  });
+
   it('a prompt whose fixed parts are over the budget less the reservation goes out with the over-budget warning, which names the reservation', async () => {
     expect(codes(await build(base))).not.toContain('TOKEN_BUDGET_EXCEEDED_POST_OPT');
     // The 1,000-token question beside 3,500 reserved tokens: nothing is left to reduce.
