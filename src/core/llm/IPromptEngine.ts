@@ -626,8 +626,8 @@ export interface IPromptEngine {
    * Estimates the tokens of the parts of a prompt that the engine never reduces to fit a model's budget, counted as
    * the engine counts them when it builds the prompt. For PromptEngine these are the system prompts, `userInput`, the
    * current turn's messages, the tools, the application note beside a memory block (its frame line, and the host's
-   * note when the turn has one) and the components' `reservedTokens`; the memory block, the other retrieved context
-   * and the history before the turn are left out.
+   * note when the turn has one), the labels a list of retrieved context puts on the memory entry, and the components'
+   * `reservedTokens`; the memory block, the other retrieved context and the history before the turn are left out.
    *
    * The GMI holds a turn's memory block to what this figure and what the hop's request carries beside the prompt
    * (the tool schemas it sends, and a response schema's instruction or payload) leave of the model's context, since

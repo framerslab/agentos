@@ -642,8 +642,10 @@ export class PromptEngine implements IPromptEngine {
    * tool round the turn's first message belongs to), the tools, and the application note as it is sent beside a memory
    * block: its frame line, the host's note when the turn has one, and the separators after it. With no turn message
    * and no `userInput`, the newest history message counts, with its tool round, since the budget step keeps it so that
-   * there is a message to send. `reservedTokens`, what the request carries beside the prompt, is counted where the
-   * components carry it.
+   * there is a message to send. Two more parts are counted where the components carry them: `reservedTokens`, what
+   * the request carries beside the prompt, and, beside a list of retrieved context (an empty one too), the `Source:`
+   * and `Content:` labels the template puts on the memory entry, with the blank line after it when the list has
+   * entries.
    *
    * The memory block, the other retrieved context and the history before the turn are not counted: the block is what
    * the caller sizes with this figure, and the other two are what the budget step reduces. A memory block of at most
@@ -683,7 +685,14 @@ export class PromptEngine implements IPromptEngine {
     const noteBesideBlock = hostNote
       ? hostNoteAsSent(hostNote, { ...components, memoryContextText: components.memoryContextText || ' ' })
       : applicationNoteOf('');
-    return partsTokens + (await this.estimateTokenCount(noteBesideBlock, modelTargetInfo.modelId)) + reservedTokensOf(components);
+    // Beside a list, the memory block is sent as the list's first entry, under labels the block's own count leaves out.
+    const listLabels = Array.isArray(components.retrievedContext) ? memoryTextAsSent('', components.retrievedContext) : '';
+    return (
+      partsTokens +
+      (await this.estimateTokenCount(noteBesideBlock, modelTargetInfo.modelId)) +
+      (await this.estimateTokenCount(listLabels, modelTargetInfo.modelId)) +
+      reservedTokensOf(components)
+    );
   }
 
   public async estimateTokenCount(content: string, modelId?: string): Promise<number> {
