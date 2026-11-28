@@ -67,10 +67,10 @@ function isTopLevelArraySchema(schema: ZodType): boolean {
 // ---------------------------------------------------------------------------
 
 /**
- * Thrown when structured output generation fails after exhausting all retries.
+ * Thrown when structured output generation exhausts its retries or the model refuses.
  *
- * Captures both the raw LLM output and the Zod validation issues so callers
- * can inspect what went wrong and surface useful diagnostics.
+ * Captures the raw LLM output and any Zod validation issues. Errors from
+ * {@link generateObject} also carry the usage accumulated across attempts.
  *
  * @example
  * ```ts
@@ -93,6 +93,7 @@ export class ObjectGenerationError extends Error {
    * @param rawText - The last raw text the LLM produced before we gave up.
    * @param validationErrors - Zod validation issues from the final attempt.
    * @param refusal - The model's refusal message, when the model refused the request.
+   * @param usage - Usage summed across the model replies received before the error.
    */
   constructor(
     message: string,
@@ -107,6 +108,8 @@ export class ObjectGenerationError extends Error {
      * this holds the piece that came.
      */
     public readonly refusal?: string,
+    /** The combined token usage and any reported cost across attempts. */
+    public readonly usage?: TokenUsage,
   ) {
     super(message);
     Object.setPrototypeOf(this, ObjectGenerationError.prototype);
@@ -532,8 +535,8 @@ function escalateForTruncation(current: number): number {
  *   and optional provider/model overrides.
  * @returns A promise resolving to the validated object, raw text, usage, and metadata.
  *
- * @throws {ObjectGenerationError} When all retries are exhausted without
- *   producing valid JSON that passes Zod validation.
+ * @throws {ObjectGenerationError} When the model refuses or all attempts fail
+ *   to produce valid JSON that passes Zod validation.
  * @throws {Error} When provider resolution fails (missing API key, unknown provider, etc.).
  *
  * @example
@@ -758,7 +761,13 @@ export async function generateObject<T extends ZodType>(
 
     // A refusal from the model is its answer to the request, not JSON to repair: the call ends on it, its message kept.
     if (result.refusal !== undefined) {
-      throw new ObjectGenerationError('The model refused the request instead of writing the object', result.text, undefined, result.refusal);
+      throw new ObjectGenerationError(
+        'The model refused the request instead of writing the object',
+        result.text,
+        undefined,
+        result.refusal,
+        totalUsage,
+      );
     }
 
     // Step 1: Try to extract JSON from the raw text
@@ -790,6 +799,9 @@ export async function generateObject<T extends ZodType>(
             : ''
         }: ${(parseErr as Error).message}`,
         result.text,
+        undefined,
+        undefined,
+        totalUsage,
       );
     }
 
@@ -915,6 +927,8 @@ export async function generateObject<T extends ZodType>(
     `Failed to generate valid structured output after ${maxRetries + 1} attempts.`,
     lastRawText,
     lastValidationError,
+    undefined,
+    totalUsage,
   );
 }
 
