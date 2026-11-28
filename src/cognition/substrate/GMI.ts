@@ -55,6 +55,7 @@ import { IRetrievalAugmentor, RagRetrievalOptions, RagDocumentInput, RagIngestio
 
 import { ChatMessage, IProvider, MessageContentPart, ModelCompletionOptions, ModelCompletionResponse, ModelUsage, ThinkingBlock } from '../../core/llm/providers/IProvider';
 import { resolveCacheCapabilities } from '../../core/llm/providers/model-cache-capabilities';
+import { customModelParamsAsSent } from '../../core/llm/providers/openrouter-only-params';
 import type { ZodType } from 'zod';
 import type { CompletionAttempt, CompletionOutcome, CompletionResolution, CompletionRoute } from '../../api/runtime/completionGateway.js';
 import { checkStructuredReply, resolveStructuredReply, STRUCTURED_REPLY_REFUSED_ISSUE, structuredRepairMessage, StructuredReplyConfigError, type StructuredReplyOutput } from '../../api/runtime/structuredReply.js';
@@ -1171,31 +1172,85 @@ export class GMI implements IGMI {
   }
 
   /**
+   * Whether a hop's request is sent the turn's response schema in place of the response format the turn forwards
+   * (`responseFormat`). A request without a response schema is sent the format as given. One with a response schema
+   * is sent the schema in its place where the gateway says so (`responseFormatReplacedWithSchema`): the gateway of
+   * `createCompletionGateway` does and says so, and a gateway without the method, or one that answers false, may pass
+   * the turn's options through to its provider as they are, format included. A GMI without a gateway sends the
+   * provider the turn's options as they are.
+   *
+   * @param resolution - The hop, when a completion gateway resolved one.
+   * @param responseSchema - The turn's response schema, when it has one.
+   * @returns Whether the forwarded format is left out of the hop's request. A gateway whose answer throws counts as
+   *   sending it.
+   */
+  private formatReplacedOn(resolution: CompletionResolution | null, responseSchema: ZodType | undefined): boolean {
+    const gateway = this.config.completionGateway;
+    if (!gateway || !resolution || !responseSchema) return false;
+    try {
+      // A gateway without the method answers undefined, which counts as sending the format.
+      return gateway.responseFormatReplacedWithSchema?.(resolution) === true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Whether a hop's request is written by the built-in provider its `providerId` names, so that what the provider
+   * leaves out of its request is left out of the count: a GMI without a gateway, or a turn the gateway resolved no hop
+   * for, calls the provider directly; a gateway says so (`requestWrittenByProvider`), as the gateway of
+   * `createCompletionGateway` does. A gateway without the method, or one that answers false, may write the request its
+   * own way, whatever provider its hop names.
+   *
+   * @param resolution - The hop, when a completion gateway resolved one.
+   * @returns Whether the provider writes the request. A gateway whose answer throws counts as writing it its own way.
+   */
+  private requestWrittenByProviderOn(resolution: CompletionResolution | null): boolean {
+    const gateway = this.config.completionGateway;
+    if (!gateway || !resolution) return true;
+    try {
+      // A gateway without the method answers undefined: its serializer is not known.
+      return gateway.requestWrittenByProvider?.(resolution) === true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
    * The tokens of what a hop's request carries beside the prompt the engine builds, or has written into that prompt
    * after it is built, so the engine's budget step cannot count them: the tool schemas the request offers, as the
    * engine's estimate of their JSON, and the turn's response schema as the hop carries it: its instruction when the
    * hop's prompt carries the schema (a system message written in after the build), and its payload, as the engine's
-   * estimate of its JSON, when the hop's request carries the schema as a parameter. On a hop with no response schema
-   * the gateway lowers, the response format the turn forwards (`responseFormat`, a JSON schema it carries included) is
-   * sent as given and counted the same way. So are the passthrough parameters (`customModelParams`), whole: a provider
-   * writes them into its request last, as given, so their `tools` replace the tool schemas on the wire and their
-   * `response_format` replaces the response format or the schema's payload, and what they replace is not counted
-   * beside them. The GMI passes the count to the prompt build (`PromptComponents.reservedTokens`), which holds the
+   * estimate of its JSON, when the hop's request carries the schema as a parameter. The response format the turn
+   * forwards (`responseFormat`, a JSON schema it carries included) is sent as given and counted the same way, except
+   * where the gateway sends the lowered response schema in its place ({@link formatReplacedOn}). So are the passthrough parameters (`customModelParams`): where a built-in
+   * provider writes the request ({@link requestWrittenByProviderOn}), as that provider sends them
+   * ({@link customModelParamsAsSent}), without the keys it strips (Gemini's fields on an OpenAI hop, OpenAI's
+   * `response_format` on a Gemini or Anthropic hop); a provider that writes them over its request's top-level fields,
+   * last, sends their `tools` in place of the tool schemas and their `response_format` in place of the response format
+   * or the schema's payload, and what they replace is not counted beside them; Gemini and Anthropic strip
+   * `response_format` and still send the schema's payload, so it is counted there. Where the gateway writes the
+   * request its own way, they are counted whole, beside what they could replace. The GMI passes
+   * the count to the prompt build (`PromptComponents.reservedTokens`), which holds the
    * prompt to the model's context less it, and adds it to the prompt's fixed parts for the memory block's budget
    * ({@link fixedPromptPartsOf}).
    *
+   * @param providerId - The built-in provider that writes the hop's request, which decides what of the passthrough
+   *   parameters is sent; undefined where the request's writer is not known ({@link requestWrittenByProviderOn}), and
+   *   they are counted whole, replacing nothing.
    * @param modelId - The hop's model.
    * @param tools - The tool schemas the hop's request carries ({@link toolsSentOn}); none when it carries none.
    * @param schemaInstruction - The response schema's instruction the hop's prompt is sent with, when it has one.
    * @param schemaPayload - The provider payload the hop's request carries the response schema in, when it has one.
    * @param responseFormat - The response format the turn forwards, where the hop's request is sent it as given (no
-   *   response schema the gateway lowers in its place).
-   * @param passthrough - The passthrough parameters (`customModelParams`) the hop's request is sent with.
+   *   response schema the gateway sends in its place, {@link formatReplacedOn}).
+   * @param passthrough - The passthrough parameters (`customModelParams`) the hop's request is given.
    * @returns The count, 0 when the request carries none of them; undefined when the engine has no
    *   `estimateTokenCount`, or its count failed or was not a finite number of at least 0 (one reasoning-trace
    *   warning), so the prompt is built with nothing reserved.
    */
   private async reservedTokensOf(
+    providerId: string | undefined,
     modelId: string,
     tools: ModelCompletionOptions['tools'],
     schemaInstruction: string | undefined,
@@ -1203,10 +1258,14 @@ export class GMI implements IGMI {
     responseFormat: ModelCompletionOptions['responseFormat'] | undefined,
     passthrough: ModelCompletionOptions['customModelParams'] | undefined,
   ): Promise<number | undefined> {
-    const passthroughJson = jsonOrEmpty(passthrough && typeof passthrough === 'object' && Object.keys(passthrough).length > 0 ? passthrough : undefined);
+    const given = passthrough && typeof passthrough === 'object' ? (passthrough as Record<string, unknown>) : undefined;
+    const asSent = providerId === undefined ? { params: given, atRoot: false } : customModelParamsAsSent(providerId, given);
+    const sentPassthrough = asSent.params && Object.keys(asSent.params).length > 0 ? asSent.params : undefined;
+    const passthroughJson = jsonOrEmpty(sentPassthrough);
     const passthroughSets = (key: string): boolean =>
-      passthroughJson !== '' && (passthrough as Record<string, unknown>)[key] !== undefined;
-    // What the passthrough parameters set replaces the option of the same wire name, so it is counted once, with them.
+      asSent.atRoot && passthroughJson !== '' && sentPassthrough?.[key] !== undefined;
+    // What the passthrough parameters the provider writes over its request set replaces the option of the same wire
+    // name, so it is counted once, with them.
     const sentTools = passthroughSets('tools') ? undefined : tools;
     const hasTools = Array.isArray(sentTools) && sentTools.length > 0;
     const sentPayload = passthroughSets('response_format') ? undefined : schemaPayload;
@@ -2550,8 +2609,9 @@ export class GMI implements IGMI {
                 capabilities: resolution.capabilities,
                 promptFormatType: this.determinePromptFormat(),
                 toolSupport: { supported: resolution.capabilities.includes('tool_use'), format: resolution.toolFormat },
+                requestWrittenByProvider: this.requestWrittenByProviderOn(resolution),
               }
-            : await this.legacyModelTargetInfo(modelIdToUse, providerIdForModel);
+            : { ...(await this.legacyModelTargetInfo(modelIdToUse, providerIdForModel)), requestWrittenByProvider: true };
 
           // The memory block for this hop's model: the turn's first rendering where the model holds it, else the block
           // rendered again (no second recall) at the smaller of what the model's share of the prompt leaves after the
@@ -2582,14 +2642,15 @@ export class GMI implements IGMI {
           // built with these tokens taken off its budget, so the earlier history and the other retrieved context are
           // kept only where the request has room for them, and the memory block is sized beside them.
           // The options as this hop is sent them: a fallback entry's replace the turn's. A response schema the gateway
-          // lowers replaces the forwarded response format.
+          // lowers replaces the forwarded response format where the gateway says so.
           const hopOptions = resolution ? { ...llmOptions, ...resolution.optionOverrides } : llmOptions;
           const hopReservedTokens = await this.reservedTokensOf(
+            modelTargetInfo.requestWrittenByProvider === true ? modelTargetInfo.providerId : undefined,
             modelTargetInfo.modelId,
             this.toolsSentOn(resolution, responseSchema) ? llmOptions.tools : undefined,
             hopSchemaInstruction,
             hopSchemaPayload,
-            gateway && resolution && responseSchema ? undefined : hopOptions.responseFormat,
+            this.formatReplacedOn(resolution, responseSchema) ? undefined : hopOptions.responseFormat,
             hopOptions.customModelParams,
           );
           const ragTokens = estimateMemoryTokens(augmentedContextFromRAG);

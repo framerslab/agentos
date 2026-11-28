@@ -97,7 +97,7 @@ const EARLIER_DEFAULTS: Recall = { retrieval: 'dense', rerank: 'none', budget: {
  * An agent whose sessions share cognitive memory (no mechanisms) that embeds through OpenAI, with the given recall
  * setting. Named, so its persona id, which each memory line's tags carry, is the same for every agent built here.
  */
-const withRecall = (apiKey: string, recall?: Recall) =>
+const withRecall = (apiKey: string, recall?: Recall, extra: Partial<AgentOptions> = {}) =>
   agent({
     runtime: 'gmi',
     name: 'Harbor',
@@ -106,6 +106,7 @@ const withRecall = (apiKey: string, recall?: Recall) =>
     apiKey,
     fallbackProviders: [],
     cognition: { memory: { embedding: { provider: 'openai' }, ...(recall ? { recall } : {}) }, mechanisms: false },
+    ...extra,
   } as unknown as AgentOptions);
 
 /**
@@ -794,6 +795,111 @@ describe("agent({ runtime: 'gmi' }) memory budget on a response-schema turn of a
       expect(tokensOf(block)).toBeLessThanOrEqual(budget.effective);
       const texts = request.messages.flatMap(textPartsOf).reduce((sum, text) => sum + engineTokensOf(text), 0);
       expect(texts + beside.payload, `the request: ${texts} tokens of text and a schema payload of ${beside.payload}`).toBeLessThanOrEqual(WINDOW);
+    } finally {
+      await a.close();
+    }
+  });
+});
+
+describe("agent({ runtime: 'gmi' }) earlier history that holds tool rounds", () => {
+  /**
+   * Four earlier tool rounds, each a question, a tool call whose arguments are about 2,500 tokens of JSON, its result
+   * and the answer: about 10,000 tokens, more than the 8,000-token model's context, and more than the 2,800 its
+   * history share holds.
+   */
+  const ROUNDS = Array.from({ length: 4 }, (_, i) => [
+    { role: 'user', content: `Earlier crossing question ${i}: log the crossing.` },
+    {
+      role: 'assistant',
+      content: null,
+      tool_calls: [{ id: `call-${i}`, type: 'function', function: { name: 'log_crossing', arguments: JSON.stringify({ crossing: i, log: `Crossing log ${i}: ${'x'.repeat(10_000)}` }) } }],
+    },
+    { role: 'tool', tool_call_id: `call-${i}`, content: `Logged crossing ${i}.` },
+    { role: 'assistant', content: `Crossing ${i} is logged.` },
+  ]).flat();
+
+  it("a tool call's arguments are counted with the history: the oldest rounds are left out, and the request fits the model's context", async () => {
+    ids.next = 0;
+    const WINDOW = 8_000;
+    const k = key(); const emb = key();
+    const s = script('openai', k, { window: WINDOW, replies: [reply.text('Pier 3.')] });
+    script('openai', emb, { replies: [] });
+    vi.stubEnv('OPENAI_API_KEY', emb);
+    const a = withRecall(k);
+    try {
+      const session = a.session('s');
+      session.reseed(ROUNDS as never);
+      const result = (await session.send(QUESTION)) as { historyOmitted?: { messages: number; tokens: number } };
+
+      const request = s.seen[0];
+      expect(request, 'the question reached the model').toBeDefined();
+      const calls = request.messages.filter((message) => Array.isArray(message.tool_calls) && message.tool_calls.length > 0);
+      // Each text the request carries, each tool call's arguments as sent, and what travels beside the messages, by
+      // PromptEngine's estimate.
+      const texts = request.messages.flatMap(textPartsOf).reduce((sum, text) => sum + engineTokensOf(text), 0);
+      const callTokens = calls.reduce((sum, message) => sum + engineTokensOf(JSON.stringify(message.tool_calls)), 0);
+      const beside = besideOf(s, 0);
+      expect(
+        texts + callTokens + beside.tools + beside.payload,
+        `the request: ${texts} tokens of text and ${callTokens} of tool calls (${calls.length} of ${ROUNDS.length / 4} rounds)`,
+      ).toBeLessThanOrEqual(WINDOW);
+      // The newest round still reached the model, whole; the oldest were left out and reported.
+      expect(calls.length).toBeGreaterThan(0);
+      expect(calls.length).toBeLessThan(ROUNDS.length / 4);
+      expect(JSON.stringify(calls[calls.length - 1].tool_calls)).toContain('call-3');
+      expect(request.messages.some((message) => message.role === 'tool' && message.tool_call_id === 'call-3')).toBe(true);
+      expect(result.historyOmitted?.messages).toBeGreaterThan(0);
+    } finally {
+      await a.close();
+    }
+  });
+
+  // An agent with an `onFallback` listener wraps its gateway once more; both wrappers keep the gateway's answer that the
+  // hop's provider writes the request.
+  it.each([
+    { listener: 'without', extra: {} },
+    { listener: 'with', extra: { onFallback: () => undefined } },
+  ])("a Gemini thought signature is not counted on an OpenAI hop, whose request leaves it out: earlier rounds that fit are kept ($listener an onFallback listener)", async ({ extra }) => {
+    ids.next = 0;
+    const WINDOW = 8_000;
+    // History recorded on Gemini: each tool call carries the opaque signature Gemini returned with it, about 3,000
+    // tokens here, which the history keeps for a later Gemini hop. OpenAI's request sends each call's id, type and
+    // function alone, so each round is about 60 tokens on that hop's wire.
+    const SIGNED = Array.from({ length: 2 }, (_, i) => [
+      { role: 'user', content: `Earlier crossing question ${i}: log the crossing.` },
+      {
+        role: 'assistant',
+        content: null,
+        tool_calls: [{ id: `call-${i}`, type: 'function', function: { name: 'log_crossing', arguments: JSON.stringify({ crossing: i }) }, thoughtSignature: `sig-${i}-${'A'.repeat(12_000)}` }],
+      },
+      { role: 'tool', tool_call_id: `call-${i}`, content: `Logged crossing ${i}.` },
+      { role: 'assistant', content: `Crossing ${i} is logged.` },
+    ]).flat();
+    const k = key(); const emb = key();
+    const s = script('openai', k, { window: WINDOW, replies: [reply.text('Pier 3.')] });
+    script('openai', emb, { replies: [] });
+    vi.stubEnv('OPENAI_API_KEY', emb);
+    const a = withRecall(k, undefined, extra as Partial<AgentOptions>);
+    try {
+      const session = a.session('s');
+      session.reseed(SIGNED as never);
+      const result = (await session.send(QUESTION)) as { historyOmitted?: { messages: number; tokens: number } };
+
+      expect(result.historyOmitted, 'the earlier rounds, whose calls the OpenAI hop sends without their signatures').toBeUndefined();
+      const request = s.seen[0];
+      expect(request, 'the question reached the model').toBeDefined();
+      for (const id of ['call-0', 'call-1']) {
+        expect(request.messages.some((message) => message.role === 'tool' && message.tool_call_id === id), `the result of ${id}`).toBe(true);
+      }
+      // The request as OpenAI's builder writes it (each call's id, type and function) fits the model's context.
+      const calls = request.messages.filter((message) => Array.isArray(message.tool_calls) && message.tool_calls.length > 0);
+      const texts = request.messages.flatMap(textPartsOf).reduce((sum, text) => sum + engineTokensOf(text), 0);
+      const callTokens = calls.reduce(
+        (sum, message) => sum + engineTokensOf(JSON.stringify((message.tool_calls ?? []).map(({ id, type, function: fn }) => ({ id, type, function: fn })))),
+        0,
+      );
+      const beside = besideOf(s, 0);
+      expect(texts + callTokens + beside.tools + beside.payload).toBeLessThanOrEqual(WINDOW);
     } finally {
       await a.close();
     }

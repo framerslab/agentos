@@ -286,6 +286,27 @@ export interface CompletionGateway {
    * written before it may send both, so both are counted.
    */
   toolsSentWithSchema?(resolution: CompletionResolution): boolean;
+  /**
+   * Whether `stream()` sends a hop's request the lowered response schema in place of the `responseFormat` the caller
+   * forwards in its options, when the request has a response schema. The gateway of `createCompletionGateway` answers
+   * true: it sends such a request the schema's payload and drops the forwarded format. A caller that sizes a request
+   * for the model's context (the GMI) leaves the forwarded format out of its count only where this is true; a gateway
+   * without the method, or one that answers false, may pass the options through to its provider as they are, so the
+   * format is counted.
+   */
+  responseFormatReplacedWithSchema?(resolution: CompletionResolution): boolean;
+  /**
+   * Whether `stream()` hands a hop's request to the built-in provider `resolution.providerId` names, which writes the
+   * request as that provider does: the passthrough parameters (`customModelParams`) without the keys it strips (OpenAI
+   * drops Gemini's `generationConfig`; Gemini and Anthropic drop `response_format`), written over its own fields where
+   * it does so, and an assistant message's tool calls without Gemini's `thoughtSignature` where it leaves that out. The
+   * gateway of `createCompletionGateway` answers true. A caller that sizes a request for the model's context (the GMI)
+   * leaves out what that provider strips only where this is true. A gateway without the method, or one that answers
+   * false, may write the request its own way (the passthrough parameters at the root of an OpenAI-compatible body,
+   * whatever provider its hop names), so the passthrough parameters are counted whole, beside the tools and the
+   * response format they could replace, and the tool calls with everything they carry.
+   */
+  requestWrittenByProvider?(resolution: CompletionResolution): boolean;
 }
 
 /** The tool format a provider expects; the same mapping as GMI.determineToolFormat. */
@@ -1090,5 +1111,15 @@ export function createCompletionGateway(defaults: Partial<CompletionRoute> = {})
     return false;
   }
 
-  return { resolve, stream, schemaInstruction, schemaPayload, toolsSentWithSchema };
+  /** A request with a response schema carries the hop's lowering of it: `stream()` writes it over the forwarded `responseFormat`, on every hop. */
+  function responseFormatReplacedWithSchema(): boolean {
+    return true;
+  }
+
+  /** `stream()` calls the hop's provider from the resolution's provider manager, which writes the request itself. */
+  function requestWrittenByProvider(): boolean {
+    return true;
+  }
+
+  return { resolve, stream, schemaInstruction, schemaPayload, toolsSentWithSchema, responseFormatReplacedWithSchema, requestWrittenByProvider };
 }
