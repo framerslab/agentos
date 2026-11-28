@@ -97,7 +97,7 @@ const EARLIER_DEFAULTS: Recall = { retrieval: 'dense', rerank: 'none', budget: {
  * An agent whose sessions share cognitive memory (no mechanisms) that embeds through OpenAI, with the given recall
  * setting. Named, so its persona id, which each memory line's tags carry, is the same for every agent built here.
  */
-const withRecall = (apiKey: string, recall?: Recall) =>
+const withRecall = (apiKey: string, recall?: Recall, extra: Partial<AgentOptions> = {}) =>
   agent({
     runtime: 'gmi',
     name: 'Harbor',
@@ -106,6 +106,7 @@ const withRecall = (apiKey: string, recall?: Recall) =>
     apiKey,
     fallbackProviders: [],
     cognition: { memory: { embedding: { provider: 'openai' }, ...(recall ? { recall } : {}) }, mechanisms: false },
+    ...extra,
   } as unknown as AgentOptions);
 
 /**
@@ -853,7 +854,12 @@ describe("agent({ runtime: 'gmi' }) earlier history that holds tool rounds", () 
     }
   });
 
-  it("a Gemini thought signature is not counted on an OpenAI hop, whose request leaves it out: earlier rounds that fit are kept", async () => {
+  // An agent with an `onFallback` listener wraps its gateway once more; both wrappers keep the gateway's answer that the
+  // hop's provider writes the request.
+  it.each([
+    { listener: 'without', extra: {} },
+    { listener: 'with', extra: { onFallback: () => undefined } },
+  ])("a Gemini thought signature is not counted on an OpenAI hop, whose request leaves it out: earlier rounds that fit are kept ($listener an onFallback listener)", async ({ extra }) => {
     ids.next = 0;
     const WINDOW = 8_000;
     // History recorded on Gemini: each tool call carries the opaque signature Gemini returned with it, about 3,000
@@ -873,7 +879,7 @@ describe("agent({ runtime: 'gmi' }) earlier history that holds tool rounds", () 
     const s = script('openai', k, { window: WINDOW, replies: [reply.text('Pier 3.')] });
     script('openai', emb, { replies: [] });
     vi.stubEnv('OPENAI_API_KEY', emb);
-    const a = withRecall(k);
+    const a = withRecall(k, undefined, extra as Partial<AgentOptions>);
     try {
       const session = a.session('s');
       session.reseed(SIGNED as never);

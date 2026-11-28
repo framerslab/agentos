@@ -344,6 +344,7 @@ function gatewayFor(opts: AgentOptions): CompletionGateway {
     schemaPayload: base.schemaPayload,
     toolsSentWithSchema: base.toolsSentWithSchema,
     responseFormatReplacedWithSchema: base.responseFormatReplacedWithSchema,
+    requestWrittenByProvider: base.requestWrittenByProvider,
     resolve: (route, after, failure) =>
       base.resolve(
         {
@@ -1027,6 +1028,8 @@ export function gmi(opts: GmiOptions): GmiHandle {
         schemaPayload: gateway.schemaPayload,
         toolsSentWithSchema: gateway.toolsSentWithSchema,
         responseFormatReplacedWithSchema: gateway.responseFormatReplacedWithSchema,
+        // stream() hands the request to the gateway's own stream() unchanged, so the gateway's answer stands.
+        requestWrittenByProvider: gateway.requestWrittenByProvider,
       },
       maxToolLoopIterations: steps,
       defaultLlmProviderId: persona.defaultProviderId,
