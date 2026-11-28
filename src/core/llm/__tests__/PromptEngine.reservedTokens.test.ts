@@ -300,8 +300,11 @@ describe("PromptEngine's history count of tool calls, by what the template sends
     const text = JSON.stringify(built.prompt);
     expect(text).toContain('Crossing 1 is logged.');
     if (signatureCounted) {
-      // Two signatures are over the history's share: the oldest round is left out.
-      expect(text, 'the oldest round, whose signature the request may carry').not.toContain('Crossing 0 is logged.');
+      // Two signatures are over the history's share: the oldest round's question, signed call and result are left out
+      // (its short answer, the round's last message, may still fit the share and be kept).
+      expect(text, "the oldest round's call, whose signature the request may carry").not.toContain('sig-0-');
+      expect(text, "the oldest round's question").not.toContain('Earlier crossing question 0');
+      expect(text, "the newer round's call, signature and all").toContain('sig-1-');
       expect(built.modificationDetails?.historyOmitted?.messages).toBeGreaterThan(0);
     } else {
       // The calls as this provider sends them are a few dozen tokens: the history fits its share whole.
