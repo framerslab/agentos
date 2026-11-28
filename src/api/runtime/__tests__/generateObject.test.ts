@@ -32,6 +32,7 @@ vi.mock('../../model.js', () => ({
 
 import { generateObject, ObjectGenerationError } from '../generateObject.js';
 import { globalLLMProviderHealth } from '../../../core/safety/LLMProviderHealthRegistry.js';
+import type { ModelUsage } from '../../../core/llm/providers/IProvider.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -40,7 +41,10 @@ import { globalLLMProviderHealth } from '../../../core/safety/LLMProviderHealthR
 /**
  * Creates a mock completion response whose assistant message contains `text`.
  */
-function mockResponse(text: string, usage = { promptTokens: 10, completionTokens: 5, totalTokens: 15 }) {
+function mockResponse(
+  text: string,
+  usage: ModelUsage = { promptTokens: 10, completionTokens: 5, totalTokens: 15 },
+) {
   return {
     modelId: 'gpt-4o',
     usage,
@@ -422,6 +426,51 @@ describe('generateObject', () => {
 
     expect(result.object).toEqual({ name: 'Frank', age: 30 });
     expect(hoisted.generateCompletion).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([
+    { failure: 'schema validation', text: '{"name": "Frank", "age": "thirty"}' },
+    { failure: 'JSON parsing', text: 'This is not JSON at all' },
+  ])('reports usage from all attempts when $failure fails', async ({ text }) => {
+    hoisted.generateCompletion
+      .mockResolvedValueOnce(mockResponse(text, {
+        promptTokens: 10, completionTokens: 5, totalTokens: 15, costUSD: 0.125,
+      }))
+      .mockResolvedValueOnce(mockResponse(text, {
+        promptTokens: 20, completionTokens: 6, totalTokens: 26, costUSD: 0.25,
+      }))
+      .mockResolvedValueOnce(mockResponse(text, {
+        promptTokens: 30, completionTokens: 7, totalTokens: 37, costUSD: 0.5,
+      }));
+
+    const result = generateObject({ schema: personSchema, prompt: 'Extract person info', maxRetries: 2 });
+
+    await expect(result).rejects.toBeInstanceOf(ObjectGenerationError);
+    await expect(result).rejects.toMatchObject({
+      usage: { promptTokens: 60, completionTokens: 18, totalTokens: 78, costUSD: 0.875 },
+    });
+  });
+
+  it('reports usage through the attempt that refused', async () => {
+    const refused = mockResponse('', {
+      promptTokens: 20, completionTokens: 6, totalTokens: 26, costUSD: 0.25,
+    });
+    hoisted.generateCompletion
+      .mockResolvedValueOnce(mockResponse('{"name": "Frank"}', {
+        promptTokens: 10, completionTokens: 5, totalTokens: 15, costUSD: 0.125,
+      }))
+      .mockResolvedValueOnce({
+        ...refused,
+        choices: [{ ...refused.choices[0], refusal: 'I cannot answer that request.' }],
+      });
+
+    const result = generateObject({ schema: personSchema, prompt: 'Extract person info', maxRetries: 2 });
+
+    await expect(result).rejects.toBeInstanceOf(ObjectGenerationError);
+    await expect(result).rejects.toMatchObject({
+      refusal: 'I cannot answer that request.',
+      usage: { promptTokens: 30, completionTokens: 11, totalTokens: 41, costUSD: 0.375 },
+    });
   });
 
   it('throws ObjectGenerationError after maxRetries exhausted with bad JSON', async () => {
